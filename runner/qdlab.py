@@ -175,6 +175,14 @@ def stop():
         subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
 
 
+def stop_copy(name):
+    """Kill only the copy started from copies/<name>."""
+    prefix = os.path.normcase(os.path.join(COPIES, name) + os.sep)
+    for pid, path in lab_pids():
+        if os.path.normcase(path).startswith(prefix):
+            subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+
+
 if __name__ == "__main__":
     a = sys.argv[1:]
     if not a:

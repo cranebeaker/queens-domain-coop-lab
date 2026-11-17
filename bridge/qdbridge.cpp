@@ -14,6 +14,9 @@
 #include "SDK/EnemyBase_classes.hpp"
 #include "SDK/ItemPickup_Base_classes.hpp"
 #include "SDK/ItemPickup_Base_parameters.hpp"
+#include "SDK/SavableActor_classes.hpp"
+#include "SDK/SavableActorState_structs.hpp"
+#include "SDK/Checkpoint_classes.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -182,6 +185,10 @@ Value SaveState() {
         v.set("xp", s->XPAmount);
         v.set("level", s->SavedPlayerLevel);
         v.set("lastCheckpoint", ObjName(s->LastTouchedCheckpoint));
+        v.set("savePoint", ObjName(s->SavePointID));
+        Value visited = Value::array();
+        for (SDK::UFS_LocationData* l : s->SavePointsVisited) visited.push(ObjName(l));
+        v.set("savePointsVisited", visited);
     }
     return v;
 }
@@ -232,6 +239,10 @@ std::vector<SDK::AActor*> WorldActors(SDK::UClass* cls) {
         if (a->bActorIsBeingDestroyed) continue;
         SDK::UObject* outer = a->Outer;
         if (!outer || !outer->IsA(SDK::ULevel::StaticClass()) || static_cast<SDK::ULevel*>(outer)->OwningWorld != w) continue;
+        // actors of streamed-out sublevels have no registered root and report exactly the origin
+        if (!a->RootComponent) continue;
+        const SDK::FVector p = a->K2_GetActorLocation();
+        if (p.X == 0 && p.Y == 0 && p.Z == 0) continue;
         out.push_back(a);
     }
     return out;
@@ -266,12 +277,59 @@ Value PlayersState() {
     return list;
 }
 
+// Saved world objects (doors, chests, elevators, barricades, secret walls, quest state, enemy spawners): each holds
+// GUIDs that key into the save's SavableActorStates. `live` is the object's own in-memory copy (MySaveData).
+Value SavablesState(double radiusCm, bool includeSpawners) {
+    Value list = Value::array();
+    SDK::AFS_PlayerChar_C* me = Player();
+    const SDK::FVector at = me ? me->K2_GetActorLocation() : SDK::FVector{};
+    SDK::UClass* spawner = SDK::UObject::FindClassFast("EnemySpawner_C");
+    for (SDK::AActor* a : WorldActors(SDK::ASavableActor_C::StaticClass())) {
+        if (!includeSpawners && spawner && a->IsA(spawner)) continue;
+        const SDK::FVector p = a->K2_GetActorLocation();
+        const double d = Dist(p, at);
+        if (me && radiusCm > 0 && d > radiusCm) continue;
+        auto* s = static_cast<SDK::ASavableActor_C*>(a);
+        Value v = Value::object();
+        v.set("name", ObjName(a));
+        v.set("class", ObjName(a->Class));
+        v.set("pos", Vec(p));
+        v.set("dist", std::round(d));
+        Value guids = Value::array();
+        for (const SDK::FGuid& g : s->GUIDs) guids.push(GuidStr(g));
+        v.set("guids", guids);
+        Value live = Value::array();
+        for (const SDK::FSavableActorState& st : s->MySaveData)
+            live.push(st.IsSet_1_52B3D8FF4C3CC8B0DAAD90BE9BA2A2B7 ? Value(st.Value_4_81204DA949BB8DCF4D35D4B4419EC024) : Value());
+        v.set("live", live);
+        v.set("hasInteract", FindFn(a, "Interact") != nullptr);
+        list.push(v);
+    }
+    return list;
+}
+
+Value CheckpointsState() {
+    Value list = Value::array();
+    SDK::AFS_PlayerChar_C* me = Player();
+    const SDK::FVector at = me ? me->K2_GetActorLocation() : SDK::FVector{};
+    for (SDK::AActor* a : WorldActors(SDK::ACheckpoint_C::StaticClass())) {
+        Value v = Value::object();
+        v.set("name", ObjName(a));
+        v.set("pos", Vec(a->K2_GetActorLocation()));
+        v.set("dist", std::round(Dist(a->K2_GetActorLocation(), at)));
+        list.push(v);
+    }
+    return list;
+}
+
 // Knights' Domain draws each remote player as a SkeletalMeshActor with the knight mesh (Knight_mesh).
 Value PuppetsState() {
     Value list = Value::array();
     for (SDK::AActor* a : WorldActors(SDK::ASkeletalMeshActor::StaticClass())) {
         auto* sk = static_cast<SDK::ASkeletalMeshActor*>(a)->SkeletalMeshComponent;
         if (!sk || ObjName(sk->SkeletalMesh) != "Knight_mesh") continue;
+        // the level also places dead knights with this mesh; the mod's are spawned at runtime with default names
+        if (ObjName(a).rfind("SkeletalMeshActor_", 0) != 0) continue;
         Value v = Value::object();
         v.set("name", ObjName(a));
         v.set("pos", Vec(a->K2_GetActorLocation()));
@@ -359,7 +417,7 @@ public:
             }
             return {true, "ok"};
         }
-        if (cmd == "interact") {   // interact <pickup actor name>: the local player picks it up (Interact BP event)
+        if (cmd == "interact") {   // interact <actor name>: the local player uses it (pickup, door, chest, checkpoint ...)
             std::string name; in >> name;
             SDK::AActor* a = ActorByName(name);
             auto* p = Player();
@@ -409,6 +467,8 @@ public:
         if (want("players")) v.set("players", PlayersState());
         if (want("pickups")) v.set("pickups", PickupsState(6000));
         if (want("puppets")) v.set("puppets", PuppetsState());
+        if (want("savables")) v.set("savables", SavablesState(6000, false));
+        if (want("checkpoints")) v.set("checkpoints", CheckpointsState());
         return v;
     }
 };

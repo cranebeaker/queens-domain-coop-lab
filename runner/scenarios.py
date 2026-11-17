@@ -80,7 +80,114 @@ def loot_and_world(a, b):
     return ok, res
 
 
-SCENARIOS = {"movement": movement, "loot_and_world": loot_and_world}
+def obj_state(g, name):
+    """An object's own live state plus the save values of its GUIDs, as seen by one copy."""
+    st = g.state(sections=["savables", "save"])
+    obj = next((s for s in st["savables"] if s["name"] == name), None)
+    if obj is None:
+        return None
+    saved = st["save"].get("savableActorStates", {})
+    return {"live": obj["live"], "saved": [saved.get(gd) for gd in obj["guids"]]}
+
+
+def use_objects(actor, other, names, settle=6):
+    """`actor` walks up to each object and uses it; report what changed on `actor` and whether `other` followed."""
+    rows, all_follow, any_changed = [], True, False
+    for n in names:
+        before_actor, before_other = obj_state(actor, n), obj_state(other, n)
+        if before_actor is None:
+            rows.append({"object": n, "skipped": "not loaded on the acting copy"})
+            continue
+        actor.exec(f"tpto {n} 150")
+        time.sleep(1)
+        try:
+            actor.exec(f"interact {n}")
+        except Exception as e:
+            rows.append({"object": n, "skipped": f"interact failed: {e}"})
+            continue
+        time.sleep(settle)
+        after_actor, after_other = obj_state(actor, n), obj_state(other, n)
+        changed = after_actor != before_actor
+        follows = after_other == after_actor
+        any_changed |= changed
+        if changed:
+            all_follow &= follows
+        rows.append({"object": n, "changed_on_actor": changed, "other_matches": follows,
+                     "actor": [before_actor, after_actor], "other": [before_other, after_other]})
+    if not any_changed:
+        return None, {"why": "no object changed state when used", "rows": rows}
+    return all_follow, {"rows": rows}
+
+
+def host_world_objects(a, b):
+    """Host opens a chest, pulls a lever, opens a secret wall: the client's copies should follow."""
+    return use_objects(a, b, ["Chest10_2", "AquaLever_23", "SecretWall7_2"])
+
+
+def client_world_objects(a, b):
+    """Client opens a different chest and secret wall: the host's copies should follow."""
+    return use_objects(b, a, ["Chest3_2", "SecretWall11_2"])
+
+
+def client_loot(a, b):
+    """Client picks up an item: it should vanish for the host and both saves should agree."""
+    target = "Herb_Item_BP_2"
+    before_a, before_b = obj_state(a, target), obj_state(b, target)
+    if before_b is None:
+        return None, {"why": f"{target} not loaded on B"}
+    inv_before = b.state(sections=["save"])["save"].get("inventory", {})
+    b.exec(f"tpto {target} 120")
+    time.sleep(1)
+    b.exec(f"interact {target}")
+    time.sleep(6)
+    after_a, after_b = obj_state(a, target), obj_state(b, target)
+    inv_after = b.state(sections=["save"])["save"].get("inventory", {})
+    res = {"pickup": target, "b": [before_b, after_b], "a": [before_a, after_a],
+           "b_inventory_change": {k: (inv_before.get(k), inv_after.get(k)) for k in set(inv_before) | set(inv_after)
+                                  if inv_before.get(k) != inv_after.get(k)}}
+    if after_b == before_b:
+        return None, {"why": "the pickup did not change state on B", **res}
+    return after_a == after_b, res
+
+
+def checkpoint(a, b):
+    """Host rests at a checkpoint: checkpoint, visited list and teleporters should match on the client."""
+    keys = ("lastCheckpoint", "savePoint", "savePointsVisited", "unlockedTeleporters")
+    before_a = {k: a.state(sections=["save"])["save"].get(k) for k in keys}
+    before_b = {k: b.state(sections=["save"])["save"].get(k) for k in keys}
+    a.exec("tpto Checkpoint17 200")
+    time.sleep(1)
+    a.exec("interact Checkpoint17")
+    time.sleep(8)
+    sa, sb = a.state(sections=["save"])["save"], b.state(sections=["save"])["save"]
+    after_a = {k: sa.get(k) for k in keys}
+    after_b = {k: sb.get(k) for k in keys}
+    res = {"a": [before_a, after_a], "b": [before_b, after_b]}
+    if after_a == before_a:
+        return None, {"why": "resting did not change the host's save", **res}
+    return all(after_a[k] == after_b[k] for k in keys), res
+
+
+def rejoin(a, b):
+    """Client leaves and joins again after the host changed the world: the new client should see the host's world.
+    Run after host_world_objects (it reuses the chest the host opened)."""
+    target = "Chest10_2"
+    host_view = obj_state(a, target)
+    rig.qdlab.stop_copy("B")
+    time.sleep(3)
+    b2 = rig.boot("B", "join")
+    time.sleep(10)
+    client_view = obj_state(b2, target)
+    puppets = remote_players(a)
+    res = {"object": target, "host": host_view, "rejoined_client": client_view, "host_sees_puppets": len(puppets)}
+    if host_view is None or not host_view.get("saved") or host_view["saved"] == [None]:
+        return None, {"why": "host never changed the chest (run host_world_objects first)", **res}
+    return client_view == host_view and len(puppets) >= 1, res
+
+
+SCENARIOS = {"movement": movement, "loot_and_world": loot_and_world, "client_loot": client_loot,
+             "host_world_objects": host_world_objects, "client_world_objects": client_world_objects,
+             "checkpoint": checkpoint, "rejoin": rejoin}
 
 
 def main(names):

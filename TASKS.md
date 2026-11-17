@@ -11,12 +11,15 @@ Run every scenario at least twice before calling a result.
 
 | # | Scenario | What to measure |
 |---|---|---|
-| 1 | `loot_and_world` (done) | host picks up an item: does it vanish for the client, and do both saves agree? Result: FAIL, nothing reaches the client |
-| 2 | `client_loot` | the same with the client picking up |
-| 3 | `doors_and_levers` | host opens a door / pulls a lever / breaks a wall: diff `savableActorStates` and `namedSaveData`, and check the client can walk through |
-| 4 | `checkpoints` | host rests at a checkpoint: `lastCheckpoint`, enemy respawn on both, what the client's save says |
-| 5 | `teleporters` | host unlocks a teleporter: `unlockedTeleporters` on both |
-| 6 | `rejoin` | client leaves and rejoins: what it keeps, what the host's world looks like to it |
+| 1 | `loot_and_world` (done, gap) | host picks up an item: nothing reaches the client |
+| 2 | `client_loot` (done, gap) | client picks up an item: nothing reaches the host |
+| 3 | `host_world_objects` / `client_world_objects` (done, gap) | chest, lever, secret wall used on one side change only on that side |
+| 4 | `checkpoint` (done, gap) | host rests at a checkpoint: only the host's save records it |
+| 5 | teleporters (folded into 4) | checkpoints are the teleport destinations; `savePointsVisited` is not shared |
+| 6 | `rejoin` (done, gap) | a rejoining client gets its own fresh world, not the host's |
+
+Lane 1 follow-ups: secret walls that need a hit instead of an interact, a door that needs a key, and whether the
+client can walk through a gate the host opened (needs a movement check, not just the save state).
 
 ## Lane 2 (friend): combat, death, network
 

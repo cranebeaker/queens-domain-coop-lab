@@ -64,19 +64,32 @@ py -3 -I runner/rig.py exec A "kd enemy"            # any Knights' Domain dev co
 `state` sections: `player` (local pos, health), `save` (inventory, savableActorStates, namedSaveData, itemDrops,
 unlockedTeleporters, killedEnemyCounts, xp, level, lastCheckpoint), `enemies` (within 60 m: class, pos, hp, dead,
 aiDisabled), `players` (player characters in the world), `puppets` (the mod's knight bodies of remote players),
-`pickups` (item pickups within 60 m).
+`pickups` (item pickups within 60 m), `savables` (saved world objects within 60 m: chests, levers, gates, secret
+walls, pickups, quest state; with their save GUIDs and live state), `checkpoints` (loaded checkpoints). Save also has
+`savePoint` and `savePointsVisited`.
 
 `exec`: `newgame <slot>`, `loadslot <slot>`, `skipintro`, `tp x y z [yaw]`, `tpto <actor> [cm]`,
-`interact <pickup actor>`, `call <BP function with no params>` on the player, `kd <line>` (the mod's dev command file).
+`interact <actor>` (any actor with an Interact event: pickup, chest, lever, checkpoint), `call <BP function with no params>` on the player, `kd <line>` (the mod's dev command file).
 
 `eval`: `world`, `title`, `loading`, `inworld`, `health`.
 
 ## Results so far (2026-11-17, Steam build 26663759, Knights' Domain 1.0.3 dev build)
 
+Each row ran twice from a fresh boot with the same result. "Gap" means the scenario shows something that is not shared.
+
 | Scenario | Result | Measured |
 |---|---|---|
-| movement | PASS | B moved 8 m, A's puppet of B ended 0 cm away (horizontal) |
+| movement | PASS | B moved 8 m, A's model of B ended 0 cm away (horizontal) |
 | loot_and_world | FAIL (gap) | A picked up `JarHammer_Pickup_2`: A inventory +1 and A's save marked it taken; on B the pickup is still there and B's save has no entry for it |
+| client_loot | FAIL (gap) | B picked up `Herb_Item_BP_2` (B +1 HealingHerb, B's save marks it taken); A's copy of the pickup is unchanged |
+| host_world_objects | FAIL (gap) | A opened `Chest10_2` and pulled `AquaLever_23`: both changed state on A only (live state and save 1 on A, unset on B). `SecretWall7_2` did not react to a plain interact |
+| client_world_objects | FAIL (gap) | B opened `SecretWall11_2`: changed on B only. `Chest3_2` did not open (probably locked) |
+| checkpoint | FAIL (gap) | A rested at `Checkpoint17`: A's save got `lastCheckpoint` and `savePointsVisited` = `GR_Camp_Save`; B's save unchanged |
+| rejoin | FAIL (gap) | B left and joined again after A opened `Chest10_2`: the rejoined B loads its own new world with the chest closed. Old teammate model removed and a new one spawned correctly |
+
+In short, version 1.0.3 shares players and enemies, but no world object, pickup, checkpoint or save state, in either
+direction. Every player plays in their own world. The `WorldFlags` and `InteractRequest` messages in its protocol are
+defined but never sent.
 
 ## Gotchas
 
@@ -89,12 +102,4 @@ aiDisabled), `players` (player characters in the world), `puppets` (the mod's kn
 
 ## Next scenarios
 
-| Gap | Scenario idea |
-|---|---|
-| World state (doors, levers, flags) | host opens a door or pulls a lever, diff `savableActorStates` / `namedSaveData` |
-| Saves and checkpoints | host rests at a checkpoint, compare `lastCheckpoint` and save files |
-| Enemy projectiles and area attacks | B god mode next to a ranged enemy targeting A, check whether B is hit (`kd god`, `kd ehit`) |
-| Drops and XP | A kills an enemy (`kd ehit`), compare `itemDrops`, `xp`, `killedEnemyCounts` on both |
-| Death | drop A to 0 health, see what B sees and whether the session survives the reload |
-| Host leaves | stop A mid-fight, watch B's log and state |
-| Lag | run the hub's `tools/chaos` relay between A and B and repeat the above |
+See [TASKS.md](TASKS.md). Lane 1 (world, loot, saves) is measured above; Lane 2 (combat, death, network) is in progress.
