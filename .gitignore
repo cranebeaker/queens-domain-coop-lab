@@ -1,0 +1,10 @@
+# game copies, generated SDK, builds and run output never go in the repo
+copies/
+sdk/
+results/
+tools/Dumper-7/
+bridge/build/
+__pycache__/
+*.log
+*.dmp
+local/
