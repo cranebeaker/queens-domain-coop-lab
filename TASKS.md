@@ -25,7 +25,7 @@ client can walk through a gate the host opened (needs a movement check, not just
 
 | # | Scenario | What to measure |
 |---|---|---|
-| 7 | `ranged_attacks` | a ranged enemy targets A, B stands in the line of fire with `kd god`: is B hit, does B see the projectile (their open issue 2) |
+| 7 | `ranged_attacks` (done, gap) | archers shooting at A: B sees the bow animation but no arrow, and is never hit standing in the line of fire (their open issue 2) |
 | 8 | `area_attacks` | the same for area attacks (water vortex, boss splash) |
 | 9 | `drops_and_xp` | A kills an enemy (`kd ehit`): `itemDrops`, `xp`, `killedEnemyCounts` on both, and who can pick up the drop |
 | 10 | `enemy_hp_agree` | hit an enemy from both sides: HP and death agree on both copies |

@@ -185,9 +185,133 @@ def rejoin(a, b):
     return client_view == host_view and len(puppets) >= 1, res
 
 
+# ------------------------------------------------------------------ Lane 2: combat
+
+def enemies(g):
+    return [e for e in g.state(sections=["enemies"])["enemies"] if not e["dead"] and not e["hidden"]]
+
+
+def kd_log_all(name):
+    p = os.path.join(rig.qdlab.mod_saved(name, rig.PROFILES[name]), "KnightsDomain.log")
+    if not os.path.isfile(p):
+        return []
+    with open(p, encoding="utf-8", errors="replace") as f:
+        return f.readlines()
+
+
+def elist_montages(name, cls, from_line):
+    """From the mod's `kd elist` lines logged since `from_line`: how many samples showed each montage on `cls`
+    enemies, and which owner slots they had."""
+    montages, owners = {}, {}
+    for line in kd_log_all(name)[from_line:]:
+        if "[edbg] E " not in line or cls not in line:
+            continue
+        fields = dict(f.split("=", 1) for f in line.split() if "=" in f)
+        m = fields.get("montage", "?")
+        montages[m] = montages.get(m, 0) + 1
+        o = fields.get("owner", "?")
+        owners[o] = owners.get(o, 0) + 1
+    return montages, owners
+
+
+def watch_summary(w, hit_cm=250):
+    """Condense a bridge `watch` record: watched actors by class, and hits split by whether a watched actor was close."""
+    by_class = {}
+    for r in w["actors"]:
+        c = by_class.setdefault(r["class"], {"count": 0, "closest_cm": None})
+        c["count"] += 1
+        if c["closest_cm"] is None or r["minDist"] < c["closest_cm"]:
+            c["closest_cm"] = r["minDist"]
+    hits = w["health"]["hits"]
+    near = [h for h in hits if h["nearestDist"] is not None and h["nearestDist"] <= hit_cm]
+    return {"watched": by_class, "hits": len(hits), "hits_with_watched_actor_close": len(near),
+            "damage": round(w["health"]["damage"]), "hit_log": hits[:12]}
+
+
+def place_in_line(a, b, enemy_class, far_cm, near_cm, approach):
+    """A stands `far_cm` from the nearest `enemy_class`, B `near_cm` from it on the same side (between it and A).
+    Returns (enemy, geometry) or (None, why)."""
+    a.exec(f"tp {approach[0]} {approach[1]} {approach[2]} 0")
+    time.sleep(2)
+    a.exec(f"kd egoto {enemy_class} {far_cm}")
+    time.sleep(2)
+    pa = local_pos(a)
+    b.exec(f"tp {pa[0]} {pa[1]} {pa[2] + 50} 0")
+    time.sleep(2)
+    b.exec(f"kd egoto {enemy_class} {near_cm}")
+    time.sleep(2)
+    pb = local_pos(b)
+    pa = local_pos(a)
+    targets = sorted((e for e in enemies(a) if enemy_class in e["class"]), key=lambda e: dist(e["pos"], pa))
+    if not targets:
+        return None, {"why": f"no live {enemy_class} within 60 m of A"}
+    en = targets[0]
+    # B's position relative to the enemy -> A line (horizontal): fraction along it and sideways offset
+    ex, ey = en["pos"][:2]
+    vx, vy = pa[0] - ex, pa[1] - ey
+    wx, wy = pb[0] - ex, pb[1] - ey
+    L = math.hypot(vx, vy) or 1.0
+    along = (wx * vx + wy * vy) / (L * L)
+    side = abs(wx * vy - wy * vx) / L
+    geo = {"enemy": en["name"], "enemy_class": en["class"], "enemy_pos": en["pos"], "a_pos": pa, "b_pos": pb,
+           "a_to_enemy_cm": round(dist(pa, en["pos"])), "b_to_enemy_cm": round(dist(pb, en["pos"])),
+           "b_along_line": round(along, 2), "b_off_line_cm": round(side)}
+    return en, geo
+
+
+def ranged_attacks(a, b, seconds=30):
+    """A ranged enemy targets A (A keeps hitting it, so it stays on A); B stands between them in god mode.
+    Shared projectiles: B sees the enemy's projectiles and gets hit by them. Both copies record every projectile-like
+    actor within 60 m and every health dent (Knights' Domain issue 2: projectiles only exist for their target)."""
+    archer = "Mossy_Archer"
+    for g in (a, b):
+        g.exec("kd god 1")
+    time.sleep(1.5)
+    en, geo = place_in_line(a, b, archer, 1000, 500, (8900, -4300, 4300))   # east side: level ground, clear shot
+    if en is None:
+        return None, geo
+    # keep the fight to ranged attacks: kill every other enemy within 30 m of the archer (the host owns them)
+    killed = []
+    for e in enemies(a):
+        if archer not in e["class"] and dist(e["pos"], en["pos"]) < 3000:
+            a.exec(f"kd ehit {e['name']} 99999")
+            killed.append(e["class"])
+    time.sleep(2)
+    archers = [e["name"] for e in enemies(a) if archer in e["class"] and dist(e["pos"], en["pos"]) < 3000]
+    log_from = {n: len(kd_log_all(n)) for n in ("A", "B")}
+    for g in (a, b):
+        g.exec("watch start 6000")
+    end = time.time() + seconds
+    next_hit = 0.0
+    while time.time() < end:
+        if time.time() >= next_hit:
+            for n in archers:   # last hitter within 6 s owns and targets: keep every archer on A
+                a.exec(f"kd ehit {n} 1")
+            next_hit = time.time() + 3
+        for g in (a, b):   # the mod logs each archer's owner and playing montage: what each copy shows
+            g.exec(f"kd elist {archer}")
+        time.sleep(0.5)
+    for g in (a, b):
+        g.exec("watch stop")
+    wa = a.state(sections=["watch"])["watch"]
+    wb = b.state(sections=["watch"])["watch"]
+    sa, sb = watch_summary(wa), watch_summary(wb)
+    for g in (a, b):
+        g.exec("kd god 0")
+    time.sleep(1)
+    sa["archer_montages"], sa["archer_owners"] = elist_montages("A", archer, log_from["A"])
+    sb["archer_montages"], sb["archer_owners"] = elist_montages("B", archer, log_from["B"])
+    res = {"geometry": geo, "other_enemies_killed": killed, "archers_on_a": len(archers), "seconds": seconds,
+           "a": sa, "b": sb}
+    if sa["hits_with_watched_actor_close"] == 0:
+        return None, {"why": "A was never hit by a projectile: the enemy did not shoot at A", **res}
+    b_sees = sum(c["count"] for c in sb["watched"].values()) > 0
+    return b_sees and sb["hits_with_watched_actor_close"] > 0, res
+
+
 SCENARIOS = {"movement": movement, "loot_and_world": loot_and_world, "client_loot": client_loot,
              "host_world_objects": host_world_objects, "client_world_objects": client_world_objects,
-             "checkpoint": checkpoint, "rejoin": rejoin}
+             "checkpoint": checkpoint, "rejoin": rejoin, "ranged_attacks": ranged_attacks}
 
 
 def main(names):

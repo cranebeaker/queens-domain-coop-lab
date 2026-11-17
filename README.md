@@ -66,10 +66,14 @@ unlockedTeleporters, killedEnemyCounts, xp, level, lastCheckpoint), `enemies` (w
 aiDisabled), `players` (player characters in the world), `puppets` (the mod's knight bodies of remote players),
 `pickups` (item pickups within 60 m), `savables` (saved world objects within 60 m: chests, levers, gates, secret
 walls, pickups, quest state; with their save GUIDs and live state), `checkpoints` (loaded checkpoints). Save also has
-`savePoint` and `savePointsVisited`.
+`savePoint` and `savePointsVisited`. `watch` (what `exec watch` recorded, see below).
 
 `exec`: `newgame <slot>`, `loadslot <slot>`, `skipintro`, `tp x y z [yaw]`, `tpto <actor> [cm]`,
-`interact <actor>` (any actor with an Interact event: pickup, chest, lever, checkpoint), `call <BP function with no params>` on the player, `kd <line>` (the mod's dev command file).
+`interact <actor>` (any actor with an Interact event: pickup, chest, lever, checkpoint), `call <BP function with no params>` on the player, `kd <line>` (the mod's dev command file),
+`watch start [radius cm]` / `watch stop`: on the game thread every 50 ms, record each actor within the radius whose
+class or a parent class name contains Projectile, Arrow, Splash, Vortex, Whirl, Wave, AOE or Spit (class, instigator,
+closest approach), and every drop in the local player's health with the closest such actor at that moment. With the
+mod's `kd god` on, health sits near 1,000,000 and is only refilled below 100,000, so every hit leaves a dent.
 
 `eval`: `world`, `title`, `loading`, `inworld`, `health`.
 
@@ -86,6 +90,7 @@ Each row ran twice from a fresh boot with the same result. "Gap" means the scena
 | client_world_objects | FAIL (gap) | B opened `SecretWall11_2`: changed on B only. `Chest3_2` did not open (probably locked) |
 | checkpoint | FAIL (gap) | A rested at `Checkpoint17`: A's save got `lastCheckpoint` and `savePointsVisited` = `GR_Camp_Save`; B's save unchanged |
 | rejoin | FAIL (gap) | B left and joined again after A opened `Chest10_2`: the rejoined B loads its own new world with the chest closed. Old teammate model removed and a new one spawned correctly |
+| ranged_attacks | FAIL (gap) | Two `Mossy_Archer_BP_C` shoot at A (10 m away) for 30 s, B in god mode stands on the line halfway (0 cm off it). Both copies play `Boner_Bow_Attack` on the archers (owner P1), but the arrows (`Mossy_Arrow_Projectile_C`) exist only on A: A saw 12 / 11 arrows and took 11 / 11 hits; B saw 0 arrows and took 0 hits |
 
 In short, version 1.0.3 shares players and enemies, but no world object, pickup, checkpoint or save state, in either
 direction. Every player plays in their own world. The `WorldFlags` and `InteractRequest` messages in its protocol are
@@ -102,4 +107,4 @@ defined but never sent.
 
 ## Next scenarios
 
-See [TASKS.md](TASKS.md). Lane 1 (world, loot, saves) is measured above; Lane 2 (combat, death, network) is in progress.
+See [TASKS.md](TASKS.md). Lane 1 (world, loot, saves) is measured above; Lane 2 (combat, death, network) is in progress: `ranged_attacks` is measured above.
