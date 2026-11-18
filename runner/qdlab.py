@@ -107,6 +107,23 @@ def place_window(pid, name, wait=60):
     return False
 
 
+def keep_logs(name):
+    """The mod starts a fresh log on every launch: keep the last one in results/logs (newest 40 per copy)."""
+    import shutil
+    import time as _t
+    out = os.path.join(LAB, "results", "logs")
+    for root, _, files in os.walk(local_appdata(name)):
+        for f in files:
+            if f == "KnightsDomain.log":
+                os.makedirs(out, exist_ok=True)
+                stamp = _t.strftime("%Y%m%d-%H%M%S", _t.localtime(os.path.getmtime(os.path.join(root, f))))
+                shutil.copyfile(os.path.join(root, f), os.path.join(out, f"{stamp}_{name}.log"))
+    if os.path.isdir(out):
+        old = sorted(x for x in os.listdir(out) if x.endswith(f"_{name}.log"))
+        for x in old[:-40]:
+            os.remove(os.path.join(out, x))
+
+
 def launch(name, extra=()):
     d = copy_dir(name)
     seed_settings(name)
@@ -116,6 +133,7 @@ def launch(name, extra=()):
             f"-WinX={x}", f"-WinY={y}", "-nosplash", *extra]
     # The mod keeps its log/config/devcmd under %LOCALAPPDATA%\QueensDomain\Saved; give each copy its own so nothing
     # lands in the owner's real folder (the engine itself uses the copy's own Saved because of -NotInstalled).
+    keep_logs(name)
     env = dict(os.environ)
     env["LOCALAPPDATA"] = local_appdata(name)
     os.makedirs(env["LOCALAPPDATA"], exist_ok=True)

@@ -171,6 +171,7 @@ Value PlayerState() {
     v.set("pos", Vec(p->K2_GetActorLocation()));
     v.set("health", p->Health);
     v.set("dead", static_cast<bool>(p->IsDead));
+    v.set("cutscene", p->CurrentCutsceneManager ? ObjName(p->CurrentCutsceneManager) : std::string());
     return v;
 }
 
@@ -519,6 +520,59 @@ Value WatchState() {
     return v;
 }
 
+// ------------------------------------------------------------------ reflection
+// A Blueprint variable by name (classes that load after the title screen are not in the SDK): bool, int, float, byte,
+// or an object (its name). Null when the actor has no such variable.
+Value ReadProp(SDK::UObject* obj, const std::string& name) {
+    for (SDK::UStruct* st = obj ? obj->Class : nullptr; st; st = st->SuperStruct) {
+        for (SDK::FField* f = st->ChildProperties; f; f = f->Next) {
+            if (!f->ClassPrivate || f->Name.ToString() != name) continue;
+            auto* p = static_cast<SDK::FProperty*>(f);
+            const uint8_t* at = reinterpret_cast<const uint8_t*>(obj) + p->Offset;
+            const std::string type = f->ClassPrivate->Name.ToString();
+            if (type == "BoolProperty") {
+                auto* b = static_cast<SDK::FBoolProperty*>(f);
+                return (at[b->ByteOffset] & b->ByteMask) != 0;
+            }
+            if (type == "IntProperty") return *reinterpret_cast<const int32_t*>(at);
+            if (type == "FloatProperty") return *reinterpret_cast<const float*>(at);
+            if (type == "ByteProperty" || type == "EnumProperty") return static_cast<int>(*at);
+            if (type == "ObjectProperty") {
+                SDK::UObject* o = *reinterpret_cast<SDK::UObject* const*>(at);
+                return o ? Value(ObjName(o)) : Value();
+            }
+            return "unsupported " + type;
+        }
+    }
+    return Value();
+}
+
+// Loaded actors whose class (or a parent class) name contains `match`, nearest first.
+Value FindActors(const std::string& match, double radiusCm) {
+    Value list = Value::array();
+    SDK::AFS_PlayerChar_C* me = Player();
+    const SDK::FVector at = me ? me->K2_GetActorLocation() : SDK::FVector{};
+    std::vector<std::pair<double, SDK::AActor*>> hits;
+    for (SDK::AActor* a : WorldActors(SDK::AActor::StaticClass())) {
+        bool m = false;
+        for (SDK::UStruct* st = a->Class; st && !m; st = st->SuperStruct) m = st->GetName().find(match) != std::string::npos;
+        if (!m) continue;
+        const double d = Dist(a->K2_GetActorLocation(), at);
+        if (radiusCm > 0 && d > radiusCm) continue;
+        hits.push_back({d, a});
+    }
+    std::sort(hits.begin(), hits.end(), [](auto& x, auto& y) { return x.first < y.first; });
+    for (auto& [d, a] : hits) {
+        Value v = Value::object();
+        v.set("name", ObjName(a));
+        v.set("class", ObjName(a->Class));
+        v.set("pos", Vec(a->K2_GetActorLocation()));
+        v.set("dist", std::round(d));
+        list.push(v);
+    }
+    return list;
+}
+
 // ------------------------------------------------------------------ adapter
 
 class Adapter : public cb::Adapter {
@@ -689,6 +743,28 @@ public:
             // both directions: a wall right behind the start point on one side must not fake a block
             const std::string fwd = tryPass(from, to), back = tryPass(to, from);
             return {true, "{\"forward\":" + fwd + ",\"backward\":" + back + "}"};
+        }
+        if (cmd == "streamlevel") {   // streamlevel <sublevel name>: load and show it (as walking into it would)
+            std::string lvl; in >> lvl;
+            SDK::FLatentActionInfo li{};
+            li.Linkage = -1;
+            li.CallbackTarget = Player();   // the latent action manager keys actions by this object
+            li.UUID = static_cast<int32_t>(GetTickCount64() & 0x7FFFFFFF);
+            SDK::UGameplayStatics::LoadStreamLevel(World(), SDK::UKismetStringLibrary::Conv_StringToName(
+                SDK::FString(std::wstring(lvl.begin(), lvl.end()).c_str())), true, false, li);
+            return {true, "streaming " + lvl};
+        }
+        if (cmd == "find") {   // find <class match> [radius cm]: loaded actors of that class, nearest first (JSON)
+            std::string match; double r = 0; in >> match >> r;
+            return {true, FindActors(match, r).dump()};
+        }
+        if (cmd == "prop") {   // prop <actor> <variable> [variable ...]: Blueprint variables by name (JSON object)
+            std::string name; in >> name;
+            SDK::AActor* a = ActorByName(name);
+            if (!a) throw cb::Error(cb::errc::kInvalidParams, "no actor " + name);
+            Value v = Value::object();
+            for (std::string pn; in >> pn;) v.set(pn, ReadProp(a, pn));
+            return {true, v.dump()};
         }
         if (cmd == "call") {
             std::string fn; in >> fn;

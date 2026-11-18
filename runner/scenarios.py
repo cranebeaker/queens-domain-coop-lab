@@ -473,7 +473,7 @@ def hits_by_class(w, near_cm):
     return {k: {"hits": v["hits"], "damage": round(v["damage"])} for k, v in out.items()}
 
 
-def area_attacks(a, b, seconds=75, near_cm=500):
+def area_attacks(a, b, seconds=150, near_cm=500):
     """The Ruins dragon boss fights A (A keeps hitting it, so it stays on A); B in god mode is kept 1.5 m from A.
     Shared area attacks: B sees the fire puddles and fireball blasts around A and takes damage from them. Hits are
     credited to the closest watched actor's class, so flame-breath projectiles are counted apart from the area ones."""
@@ -503,7 +503,8 @@ def area_attacks(a, b, seconds=75, near_cm=500):
             a.exec(f"kd ehit {target} 1")   # last hitter within 6 s owns and targets
             next_hit = time.time() + 3
         pa = local_pos(a)
-        b.exec(f"tp {pa[0] + 150} {pa[1]} {pa[2] + 30} 0")
+        # B stands where A stands: the dragon aims at A's feet, so its fire lands where B is too
+        b.exec(f"tp {pa[0] + 20} {pa[1]} {pa[2] + 30} 0")
         time.sleep(0.6)
         gaps.append(round(dist(local_pos(b)[:2], local_pos(a)[:2])))
         b.exec(f"kd elist {boss}")
@@ -618,7 +619,9 @@ def drops_and_xp(a, b, spot=(3000, -2000, 500), kills=10):
 
     pk_a, pk_b = visible_pickups(a), visible_pickups(b)
     kill_at = [en["pos"] for en in targets]
-    near_kill = lambda p: any(dist(p["pos"], k) < 800 for k in kill_at)   # drops land at the enemy's feet
+    # drops land at the enemy's feet and are spawned at run time ("<Class>_<number>"); placed pickups that stream in
+    # near a kill are not drops
+    near_kill = lambda p: any(dist(p["pos"], k) < 800 for k in kill_at) and p["name"].startswith(p["class"] + "_")
     new = {"A": {n: p for n, p in pk_a.items() if n not in picks_before["A"] and near_kill(p)},
            "B": {n: p for n, p in pk_b.items() if n not in picks_before["B"] and near_kill(p)}}
     res = {"spot": spot, "kills": rows,
@@ -1034,6 +1037,136 @@ SCENARIOS = {"movement": movement, "loot_and_world": loot_and_world, "client_loo
              "lag": lag}
 
 # Each group runs on a freshly booted pair, so one group's actions never leak into the next one's checks.
+
+# ------------------------------------------------------------------ Lane A: events shared by the party
+
+def find(g, match, radius=0):
+    return json.loads(g.exec(f"find {match} {radius}")["output"])
+
+
+def props(g, actor, *names):
+    return json.loads(g.exec(f"prop {actor} {' '.join(names)}")["output"])
+
+
+TRIGGER_PROPS = ("HasAlreadybeenTriggered", "Activations")
+
+
+def triggers_shared(a, b, tries=12):
+    """A walks into activation triggers near the start (stands in their volume): each one that fires on A should fire
+    on B's copy too (same one-shot flag and activation count), although B's player is not in it."""
+    rows = []
+    for t in find(a, "ActivationTrigger", 15000)[:tries]:
+        n = t["name"]
+        # B nearby (so its copy is streamed in and the name means the same trigger) but outside the volume
+        b.exec(f"tp {t['pos'][0] + 600} {t['pos'][1]} {t['pos'][2] + 100} 0")
+        time.sleep(3)
+        try:
+            b.exec(f"tpto {n} 600")
+        except Exception:
+            continue
+        time.sleep(2)
+        try:
+            before_a, before_b = props(a, n, *TRIGGER_PROPS), props(b, n, *TRIGGER_PROPS)
+        except Exception:
+            continue
+        if before_a.get("HasAlreadybeenTriggered") or before_b.get("HasAlreadybeenTriggered"):
+            continue
+        a.exec(f"tp {t['pos'][0]} {t['pos'][1]} {t['pos'][2] + 40} 0")   # into the volume, like walking in
+        how = "walked in"
+        time.sleep(4)
+        after_a = props(a, n, *TRIGGER_PROPS)
+        if after_a == before_a:
+            a.exec(f"callon {n} DoTrigger")   # volume needs something else (grounding, an item): fire it directly
+            how = "DoTrigger"
+            time.sleep(4)
+            after_a = props(a, n, *TRIGGER_PROPS)
+        try:
+            after_b = props(b, n, *TRIGGER_PROPS)
+        except Exception as e:
+            after_b = {"error": str(e)}
+        if after_a == before_a:
+            continue
+        rows.append({"trigger": n, "how": how, "a": [before_a, after_a], "b": [before_b, after_b],
+                     "b_follows": after_b == after_a})
+        if len(rows) >= 3:
+            break
+    if not rows:
+        return None, {"why": "no activation trigger near the start changed when A used it"}
+    return all(r["b_follows"] for r in rows), {"rows": rows}
+
+
+QUEEN_CUTSCENES = (77518, -52166, -34400)   # 998_QueenCutscenes: Sipeha transition and endings 1 and 2
+
+
+def cutscene_shared(a, b):
+    """A starts a level-placed cutscene (the Sipeha transition in the Queen's arena, not an ending): B's player should
+    be in it too."""
+    for g in (a, b):
+        g.exec(f"tp {QUEEN_CUTSCENES[0]} {QUEEN_CUTSCENES[1]} {QUEEN_CUTSCENES[2]} 0")
+        g.exec("streamlevel 998_QueenCutscenes")
+    mgrs = []
+    for _ in range(10):   # the cutscene sublevel streams in once a player is there
+        time.sleep(3)
+        mgrs = [m for m in find(a, "CutsceneManagerBase") if "Ending" not in m["class"]]
+        if mgrs and [m for m in find(b, "CutsceneManagerBase") if "Ending" not in m["class"]]:
+            break
+    if not mgrs:
+        return None, {"why": "no cutscene manager streamed in at the Queen's arena"}
+    pick = next((m for m in mgrs if "Sipeha" in m["class"]), mgrs[0])
+    n = pick["name"]
+    before = {"A": a.state(sections=["player"])["player"].get("cutscene"),
+              "B": b.state(sections=["player"])["player"].get("cutscene")}
+    a.exec(f"callon {n} BeginCutscene")
+    time.sleep(5)
+    during = {"A": a.state(sections=["player"])["player"].get("cutscene"),
+              "B": b.state(sections=["player"])["player"].get("cutscene")}
+    for g in (a, b):   # leave nobody stuck in it
+        try:
+            g.exec(f"callon {n} SkipCutscene")
+        except Exception:
+            pass
+    time.sleep(5)
+    res = {"manager": n, "class": pick["class"], "before": before, "during": during}
+    if not during["A"]:
+        return None, {"why": "the cutscene did not start on A", **res}
+    return bool(during["B"]), res
+
+
+def pot_loot(a, b, spot=(3000, -2000, 500), tries=25):
+    """A breaks pots until one drops loot: the pot breaks on B too, B sees the same drop (one of it), and B cannot
+    roll a second one."""
+    a.exec(f"tp {spot[0]} {spot[1]} {spot[2]} 0")
+    time.sleep(3)
+    pots = find(a, "Pot_Base", 8000)
+    rows = []
+    for pt in pots[:tries]:
+        n = pt["name"]
+        a.exec(f"tpto {n} 200")
+        time.sleep(1)
+        b.exec(f"tpto {n} 300")
+        time.sleep(2)
+        near = lambda g: sorted(p["class"] for p in g.state(sections=["pickups"])["pickups"]
+                                if not p["hidden"] and dist(p["pos"], pt["pos"]) < 400)
+        before_a, before_b = near(a), near(b)
+        try:
+            a.exec(f"callon {n} Break")
+        except Exception:
+            continue
+        time.sleep(5)
+        after_a, after_b = near(a), near(b)
+        new_a = [c for c in after_a if c not in before_a or after_a.count(c) > before_a.count(c)]
+        new_b = [c for c in after_b if c not in before_b or after_b.count(c) > before_b.count(c)]
+        rows.append({"pot": n, "a_new": new_a, "b_new": new_b, "b_pot_hidden": not any(
+            q["name"] == n for q in find(b, "Pot_Base", 2000) if dist(q["pos"], pt["pos"]) < 50)})
+        if new_a:
+            break
+    if not rows or not rows[-1]["a_new"]:
+        return None, {"why": "no pot dropped anything on A", "rows": rows}
+    last = rows[-1]
+    return sorted(last["a_new"]) == sorted(last["b_new"]), {"rows": rows}
+
+SCENARIOS.update({"triggers_shared": triggers_shared, "cutscene_shared": cutscene_shared, "pot_loot": pot_loot})
+
 SUITES = {
     "lane1": [
         # the gate goes first: after the long-range teleports of the object checks its sublevel stops animating
@@ -1043,8 +1176,10 @@ SUITES = {
     # every Lane 2 scenario changes the fight or ends the session: one fresh pair each
     "lane2": [["ranged_attacks"], ["area_attacks"], ["drops_and_xp"], ["enemy_hp_agree"], ["death"],
               ["host_leaves"]],
+    # round 2, Lane A: events the party shares (the cutscene last: it can move players around)
+    "laneA": [["triggers_shared", "pot_loot"], ["cutscene_shared"]],
 }
-SUITES["all"] = SUITES["lane1"] + SUITES["lane2"]
+SUITES["all"] = SUITES["lane1"] + SUITES["lane2"] + SUITES["laneA"]
 
 
 def run(names, results):

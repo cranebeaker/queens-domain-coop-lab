@@ -12,9 +12,12 @@ as a pull request when it is done). This repository keeps the test rig, the scen
 |---|---|---|
 | World objects, pickups, gates, lifts, breakables | `sync/WorldSync.cpp` | `loot_and_world`, `client_loot`, `host_world_objects`, `client_world_objects`, `host_gate`, `client_gate` |
 | Story counters, checkpoints, teleporters, rejoin | `sync/WorldSync.cpp` | `checkpoint`, `client_checkpoint`, `story_flags`, `rejoin`, `client_progress_persists` |
-| Enemy projectiles and area attacks | `sync/HazardSync.cpp` | `ranged_attacks` (pass), `area_attacks` (being fixed) |
+| Enemy projectiles and area attacks | `sync/HazardSync.cpp` | `ranged_attacks`, `area_attacks` |
 | Loot rolled once, picked up once | `sync/HazardSync.cpp`, `sync/WorldSync.cpp` | `drops_and_xp` |
 | Player sync survives the crash after a death | `sync/PlayerSync.cpp` | `death`, `lag` |
+| Trigger volumes, cutscenes and pots fire for everyone | `sync/WorldSync.cpp` (mirrored events) | `triggers_shared`, `cutscene_shared`, `pot_loot` |
+
+2026-11-18: `--suite all` (21 scenarios) and `lag` (7) all pass on `world-sync`.
 
 Every world change in the game goes through the save's `SavableActorStates` and `NamedSaveData`, which WorldSync
 mirrors, so those rows hold for every area, not only the Ruins.
@@ -30,11 +33,11 @@ about it: it is the game's real logic. Never commit anything under `tools/ue`.
 
 | # | Task | Start from |
 |---|---|---|
-| A1 | `area_attacks` passes: the boss's fire hurts the other player too | `Enemies/Dragon/*`, `Enemies/Fisher_00/.../Fisher_SZ_FirePuddle` |
-| A2 | Cutscenes play for everyone: who starts one, what the others see, nobody stuck | `Cutscenes/CutsceneManagerBase`, `Cutscenes/RitualCutscene`, `Cutscenes/Ending1..4`, `RuinsLevel/Intro/Sequences` |
-| A3 | Trigger volumes that set story state or quests fire once for the party | `Blueprints/ActivationTrigger`, `NamedSaveDataSetterVolume`, `ChallengeCompleteVolume`, `QuestForceUpdateVolume`, `ActivatableNamedSaveDataSetter` |
-| A4 | NPC dialogue and turn-ins agree on both machines | `NPCs/*` (Chef eggs, Fish Wife, Librarian, Knight NPCs), `Blueprints/DialogueManager` |
-| A5 | Pause and rest: no player freezes the other | `LD45/Blueprints/Base_LD45_GM`, `Player/FS_PlayerChar`, checkpoint rest |
+| A1 (done) | `area_attacks` passes: the boss's fire hurts the other player too | `Enemies/Dragon/*`, `Enemies/Fisher_00/.../Fisher_SZ_FirePuddle` |
+| A2 (done) | Cutscenes play for everyone: who starts one, what the others see, nobody stuck | `Cutscenes/CutsceneManagerBase`, `Cutscenes/RitualCutscene`, `Cutscenes/Ending1..4`, `RuinsLevel/Intro/Sequences` |
+| A3 (done) | Trigger volumes that set story state or quests fire once for the party | `Blueprints/ActivationTrigger`, `NamedSaveDataSetterVolume`, `ChallengeCompleteVolume`, `QuestForceUpdateVolume`, `ActivatableNamedSaveDataSetter` |
+| A4 (done) | NPC dialogue and turn-ins agree on both machines (all named save data, shared by WorldSync) | `NPCs/*` (Chef eggs, Fish Wife, Librarian, Knight NPCs), `Blueprints/DialogueManager` |
+| A5 (done) | Pause and rest: no player freezes the other (Knights' Domain's rules module) | `LD45/Blueprints/Base_LD45_GM`, `Player/FS_PlayerChar`, checkpoint rest |
 | A6 | Pull request to the author once A1 to A5 and Lane B pass | |
 
 ### Lane B (friend): bosses and the later areas
