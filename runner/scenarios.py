@@ -1817,6 +1817,153 @@ def ribber_boss(a, b):
                           ("b", "kd ewake Ribber_Boss"), "AquaRuins", flags=("AquaRuinsRibberMiniboss",))
 
 
+def loot_kneeling(a, b, classes):
+    """Bosses that kneel and hand their loot to whoever talks to them (Blood Lords, Mecha Knights, Bridge Lord): each
+    player talks to their own copies; what each got."""
+    out = {}
+    for who, g in (("a", a), ("b", b)):
+        got = {}
+        for c in classes:
+            for x in g.state(sections=["enemies"])["enemies"]:
+                if c in x["class"] and getvar(g, x["name"], "DeathIsSuspended") == "true":
+                    got.update(talk_reward(g, x["name"]))
+        out[who] = got
+    return out
+
+
+def demon_duo(a, b):
+    """Demon duo (Mausoleum dark maze). The CLIENT sets the spider's spawner off: the front door shuts and both the
+    Demon Spider and the Hellbat are there on both copies; their attacks hit each player; both die on both copies,
+    both saves have DemonBossesKilled and the door opens again on both."""
+    return boss_encounter(a, b, "DemonSpider", "DemonSpider_Spawner_0", (-16948, 18700, -8250),
+                          ("b", "activate DemonSpider_Spawner_0"), "Mausoleum", door_vars=("FrontDoor",), partners=("Hellbat",),
+                          flags=("DemonBossesKilled",))
+
+
+def bridge_lord(a, b):
+    """Bridge Lord (castle bridge). The CLIENT sets it off: both bridge doors shut and their blockers rise on both
+    copies; its gunfire and blade hit each player; it kneels on both, each player talks to their own copy, both saves
+    have BridgeLordDead and the doors open on both."""
+    def extra(a, b, res, checks):
+        res["loot"] = None
+    ok, res = boss_encounter(a, b, "JosamiLord_BP", "JosamiLord_Spawner_2", (-51820, -17253, -32050),
+                             ("b", "activate JosamiLord_Spawner_2"), "loc:Castle_Teleporter", door_vars=("FrontDoor", "RearDoor", "Front", "Rear"),
+                             open_after=False, extra=extra)
+    if ok is None:
+        return ok, res
+    checks = res["checks"]
+    # its reward is a death talk on each player's own copy (no item); the talk's end saves BridgeLordDead
+    res["loot"] = loot_kneeling(a, b, ("JosamiLord_BP",))
+    time.sleep(4)
+    res["saves"] = both(lambda g: named(g, "BridgeLordDead"), a, b)
+    checks["BridgeLordDead_both"] = all((x.get("BridgeLordDead") or 0) >= 1 for x in res["saves"].values())
+    res["doors_after"] = {d: both(lambda g: door_open(g, d), a, b) for d in res["doors"]}
+    checks["arena_open_both"] = all(v == {"a": True, "b": True} for v in res["doors_after"].values())
+    res["checks"] = checks
+    return all(checks.values()), res
+
+
+def blood_lords(a, b):
+    """Blood Lords (Prison). The CLIENT starts the fight: the door shuts and both sisters are there on both copies; their
+    attacks hit each player; both kneel on both copies, each player takes the amulets from their own copies, both saves
+    have RedLordsDead and the door opens on both."""
+    ok, res = boss_encounter(a, b, "JosamiBloodLord_Sword", "JosamiBloodLord_Sword_Spawner_2", (27600, 1500, -6950),
+                             ("b", "callon JosamiBloodLord_Sword_Spawner_2 StartFight"), "Prison_SZ", door_vars=("Door",),
+                             partners=("JosamiBloodLord_Gun",), spawn_first=False, open_after=False)
+    if ok is None or not all(v for k, v in res["checks"].items() if k.endswith("_on_both")):
+        return ok, res
+    checks = res["checks"]
+    res["loot"] = loot_kneeling(a, b, ("JosamiBloodLord_Sword", "JosamiBloodLord_Gun"))
+    checks["loot_each"] = bool(res["loot"]["a"]) and set(res["loot"]["a"]) == set(res["loot"]["b"])
+    time.sleep(4)
+    res["saves"] = both(lambda g: named(g, "RedLordsDead"), a, b)
+    checks["RedLordsDead_both"] = all((x.get("RedLordsDead") or 0) >= 1 for x in res["saves"].values())
+    res["doors_after"] = {d: both(lambda g: door_open(g, d), a, b) for d in res["doors"]}
+    checks["arena_open_both"] = all(v == {"a": True, "b": True} for v in res["doors_after"].values())
+    res["checks"] = checks
+    return all(checks.values()), res
+
+
+def mecha_knights(a, b):
+    """Mossy Mecha Knight (shop isle) and Mausoleum lance knight. Each wakes for the CLIENT; its attacks hit each player
+    it fights; it kneels on both copies and each player gets its key from their own copy."""
+    res, checks = {}, {}
+    for cls, spawner, spot, levels in (
+            ("MechaKnight_DualAxe_Mossy", "MechaKnight_DualAxe_ShopSpawner", (3808, 40207, 2510), "loc:GR_ShopIsland_Save"),
+            ("MechaKnight_MausLance", "MechaKnight_00_Spawner", (5318, 14413, 7910), "Mausoleum")):
+        ok, r = boss_encounter(a, b, cls, spawner, spot, ("b", f"kd ewake {cls}"), levels, open_after=False)
+        if ok is None:
+            res[cls] = r
+            checks[f"{cls}_setup"] = False
+            continue
+        r["loot"] = loot_kneeling(a, b, (cls,))
+        r["checks"]["loot_each"] = bool(r["loot"]["a"]) and set(r["loot"]["a"]) == set(r["loot"]["b"])
+        res[cls] = r
+        for k, v in r["checks"].items():
+            checks[f"{cls}:{k}"] = v
+    res["checks"] = checks
+    return all(checks.values()), res
+
+
+def queen(a, b):
+    """The Queen (castle throne room). She wakes for the CLIENT: her door shuts on both copies (it shut on her aggro,
+    which only fires on the host); her attacks hit each player; when she enters a later phase on the host the
+    client's copy enters it too, and the throne breaks on both. Her death plays an ending and changes level (cutscenes
+    are Lane A), so the scenario stops before it."""
+    cls, spawner = "Queen_BP", "Queen_Spawner_BP_2"
+    if not boss_scenario_start(a, b, (-51797, -53400, -34450), (-51650, -53400, -34450), "AutumnIslandCastle",
+                               spawner):
+        return None, {"why": "the throne room did not load"}
+    if not ensure_boss(a, b, cls, spawner):
+        return None, {"why": "the Queen is not on both copies"}
+    res, checks = {}, {}
+    log_from = {n: len(kd_log_all(n)) for n in ("A", "B")}
+    door = None
+    for v in ("Door", "FrontDoor"):
+        d = getvar(a, spawner, v)
+        if d and d != "None":
+            door = d
+            break
+    res["door"] = door
+    b.exec(f"kd ewake {cls}")
+    time.sleep(8)
+    res["fight"] = fight(a, b, cls, seconds=120, host_first=True)   # her attack cycle is slow
+    checks["attacks_hit_b"] = res["fight"]["b_fights"]["b"]["hits"] > 0
+    checks["attacks_hit_a"] = res["fight"]["a_fights"]["a"]["hits"] > 0
+    if door:
+        res["door_in_fight"] = both(lambda g: door_open(g, door), a, b)
+        checks["arena_locked_both"] = res["door_in_fight"] == {"a": False, "b": False}
+    # her phases are the native CurrentSubState (the client's copy follows the owner's); her death plays the ending,
+    # so she is brought to a later phase, not killed
+    def phase(g):
+        x = boss_of(g, cls)
+        v = getvar(g, x["name"], "CurrentSubState") if x else None
+        return int(v) if v not in (None, "") and v.lstrip("-").isdigit() else None
+    res["phase_before"] = both(phase, a, b)
+    a.exec(f"kd ehp {cls} 0.3")
+    for _ in range(6):   # a few hits for her to notice the lower health
+        a.exec(f"kd ehit {cls} 1")
+        time.sleep(2.5)
+    time.sleep(6)
+    res["phase_after"] = both(phase, a, b)
+    p0, p1 = res["phase_before"]["a"], res["phase_after"]
+    checks["later_phase_both"] = p0 is not None and p1["a"] is not None and p1["a"] > p0 and p1["a"] == p1["b"]
+    res["calls_sent"], res["calls_run"] = calls_follow(log_from, ("DoStateTransition", "Break"))
+    # the host's Blueprint may run a call twice in a row; the client runs each one once
+    checks["throne_follows"] = set(res["calls_sent"]) == set(res["calls_run"])
+    boss_scenario_end(a, b)
+    res["checks"] = checks
+    return all(checks.values()), res
+
+
+def sipeha(a, b):
+    """Sipeha (its own world). It wakes for the CLIENT: its arena door shuts on both copies; its attacks hit each player
+    it fights; it kneels on both. (What follows is an ending: Lane A.)"""
+    return boss_encounter(a, b, "Sipeha_BP", "Sipeha_Spawner", (27088, -33900, 20600), ("b", "activate Sipeha_Spawner"),
+                          "call:TeleportToSipehaArena",
+                          door_vars=("Door",), open_after=False)
+
+
 SCENARIOS = {"movement": movement, "loot_and_world": loot_and_world, "client_loot": client_loot,
              "host_world_objects": host_world_objects, "client_world_objects": client_world_objects,
              "host_gate": host_gate, "client_gate": client_gate,
@@ -1829,6 +1976,7 @@ SCENARIOS = {"movement": movement, "loot_and_world": loot_and_world, "client_loo
              "whaleking": whaleking, "king_of_stone": king_of_stone, "royal_fishmaner": royal_fishmaner,
              "evil_fishwife": evil_fishwife, "white_tree_golem": white_tree_golem,
              "ros_dragon": ros_dragon, "josami_des": josami_des, "royal_duo": royal_duo, "black_robot_duo": black_robot_duo, "blood_pool_duo": blood_pool_duo, "cocker_boss": cocker_boss, "ribber_boss": ribber_boss,
+             "demon_duo": demon_duo, "bridge_lord": bridge_lord, "blood_lords": blood_lords, "mecha_knights": mecha_knights, "queen": queen, "sipeha": sipeha,
              "lag": lag}
 
 # Each group runs on a freshly booted pair, so one group's actions never leak into the next one's checks.
@@ -1978,7 +2126,8 @@ SUITES = {
 SUITES["b1"] = [["grave_guardian"], ["executioner", "lost_librarian"], ["necronomicon"]]
 SUITES["b2"] = [["whaleking"], ["king_of_stone"], ["royal_fishmaner"], ["evil_fishwife"], ["white_tree_golem"]]
 SUITES["b3"] = [["ros_dragon"], ["josami_des"], ["royal_duo"], ["black_robot_duo"], ["blood_pool_duo"], ["cocker_boss", "ribber_boss"]]
-SUITES["laneb"] = SUITES["b1"] + SUITES["b2"] + SUITES["b3"]
+SUITES["b4"] = [["demon_duo"], ["bridge_lord"], ["blood_lords"], ["mecha_knights"], ["queen"], ["sipeha"]]
+SUITES["laneb"] = SUITES["b1"] + SUITES["b2"] + SUITES["b3"] + SUITES["b4"]
 SUITES["all"] = SUITES["lane1"] + SUITES["lane2"] + SUITES["laneA"] + SUITES["laneb"]
 
 
