@@ -10,6 +10,7 @@
 #include "SDK/TitleScreenUI_classes.hpp"
 #include "SDK/TitleScreenUI_parameters.hpp"
 #include "SDK/FS_PlayerChar_classes.hpp"
+#include "SDK/FS_PlayerChar_parameters.hpp"
 #include "SDK/FS_SaveSlot_classes.hpp"
 #include "SDK/EnemyBase_classes.hpp"
 #include "SDK/ItemPickup_Base_classes.hpp"
@@ -146,6 +147,20 @@ std::wstring KdDevCmdPath() {
 
 // ------------------------------------------------------------------ state
 
+// Live widgets whose class name contains `match` (Blueprint UI that loads after the title screen is not in the SDK).
+std::vector<SDK::UUserWidget*> WidgetsMatching(const std::string& match) {
+    std::vector<SDK::UUserWidget*> out;
+    auto& objs = SDK::UObject::GObjects;
+    SDK::UClass* cls = SDK::UUserWidget::StaticClass();
+    for (int i = 0; i < objs->Num(); ++i) {
+        SDK::UObject* o = objs->GetByIndex(i);
+        if (!o || o->IsDefaultObject() || !o->IsA(cls)) continue;
+        if (!match.empty() && ObjName(o->Class).find(match) == std::string::npos) continue;
+        out.push_back(static_cast<SDK::UUserWidget*>(o));
+    }
+    return out;
+}
+
 Value PlayerState() {
     Value v = Value::object();
     SDK::AFS_PlayerChar_C* p = Player();
@@ -154,6 +169,7 @@ Value PlayerState() {
     v.set("class", ObjName(p->Class));
     v.set("pos", Vec(p->K2_GetActorLocation()));
     v.set("health", p->Health);
+    v.set("dead", static_cast<bool>(p->IsDead));
     return v;
 }
 
@@ -335,6 +351,12 @@ Value PuppetsState() {
         v.set("name", ObjName(a));
         v.set("pos", Vec(a->K2_GetActorLocation()));
         v.set("hidden", static_cast<bool>(a->bHidden));
+        // the mod drives puppets in single-node mode: the playing asset tells idle / walk / attack / death apart
+        SDK::UAnimInstance* ai = sk->AnimScriptInstance;
+        std::string anim;
+        if (ai && ai->IsA(SDK::UAnimSingleNodeInstance::StaticClass()))
+            anim = ObjName(static_cast<SDK::UAnimSingleNodeInstance*>(ai)->CurrentAsset);
+        v.set("anim", anim);
         list.push(v);
     }
     return list;
@@ -565,6 +587,34 @@ public:
             auto* p = Player();
             if (!p || !CallNoParams(p, fn)) throw cb::Error(cb::errc::kInvalidParams, "cannot call " + fn);
             return {true, "called " + fn};
+        }
+        if (cmd == "widgets") {   // widgets [class match]: live widget classes; with a match, also their own functions
+            std::string match; in >> match;
+            std::map<std::string, int> seen;
+            std::string fns;
+            for (auto* w : WidgetsMatching(match)) {
+                ++seen[ObjName(w->Class)];
+                if (!match.empty() && fns.empty())
+                    for (SDK::UField* f = w->Class->Children; f; f = f->Next)
+                        if (f->IsA(SDK::UFunction::StaticClass())) fns += ObjName(f) + " ";
+            }
+            std::string txt;
+            for (auto& [k, n] : seen) txt += k + "x" + std::to_string(n) + " ";
+            return {true, txt + (fns.empty() ? "" : "| functions: " + fns)};
+        }
+        if (cmd == "uicall") {   // uicall <widget class match> <function>: call a no-parameter function on it
+            std::string match, fn; in >> match >> fn;
+            auto ws = WidgetsMatching(match);
+            for (auto* w : ws)
+                if (CallNoParams(w, fn)) return {true, "called " + fn + " on " + ObjName(w)};
+            throw cb::Error(cb::errc::kInvalidParams, "no widget " + match + " with " + fn);
+        }
+        if (cmd == "die") {   // die: the local player dies the normal way (the player Blueprint's Kill)
+            auto* p = Player();
+            if (!p) throw cb::Error(cb::errc::kInvalidParams, "no player");
+            SDK::Params::FS_PlayerChar_C_Kill k{};
+            Need(CallWith(p, "Kill", k), "Kill");
+            return {true, "killed the local player"};
         }
         if (cmd == "watch") {   // watch start [radius cm] [word ...] | watch stop: see WatchTick; read with state "watch"
             std::string sub; in >> sub;

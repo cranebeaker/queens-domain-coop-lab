@@ -61,15 +61,15 @@ py -3 -I runner/rig.py exec A "kd enemy"            # any Knights' Domain dev co
 
 ## Bridge commands
 
-`state` sections: `player` (local pos, health), `save` (inventory, savableActorStates, namedSaveData, itemDrops,
+`state` sections: `player` (local pos, health, dead), `save` (inventory, savableActorStates, namedSaveData, itemDrops,
 unlockedTeleporters, killedEnemyCounts, xp, level, lastCheckpoint), `enemies` (within 60 m: class, pos, hp, dead,
-aiDisabled), `players` (player characters in the world), `puppets` (the mod's knight bodies of remote players),
+aiDisabled), `players` (player characters in the world), `puppets` (the mod's knight bodies of remote players, with the animation each one plays: idle, walk, attack, `Knight_Undead_Death`),
 `pickups` (item pickups within 60 m), `savables` (saved world objects within 60 m: chests, levers, gates, secret
 walls, pickups, quest state; with their save GUIDs and live state), `checkpoints` (loaded checkpoints). Save also has
 `savePoint` and `savePointsVisited`. `watch` (what `exec watch` recorded, see below).
 
 `exec`: `newgame <slot>`, `loadslot <slot>`, `skipintro`, `tp x y z [yaw]`, `tpto <actor> [cm]`,
-`interact <actor>` (any actor with an Interact event: pickup, chest, lever, checkpoint), `call <BP function with no params>` on the player, `kd <line>` (the mod's dev command file),
+`interact <actor>` (any actor with an Interact event: pickup, chest, lever, checkpoint), `call <BP function with no params>` on the player, `die` (the local player dies through the player Blueprint's own `Kill`), `widgets [class match]` (live UI widget classes; with a match, also that widget's own functions), `uicall <widget class match> <function>` (call a function on a live widget, e.g. the Game Over screen's Continue button), `kd <line>` (the mod's dev command file),
 `watch start [radius cm] [word ...]` / `watch stop`: on the game thread every 50 ms, record each actor within the radius whose
 class or a parent class name contains one of the words (default: Projectile, Arrow, Splash, Vortex, Whirl, Wave, AOE,
 Spit, Puddle, Fireball, Creep, Explosion, Shockwave) with its class, instigator and closest approach, and every drop in the local player's health with the closest such actor at that moment. With the
@@ -94,6 +94,7 @@ Each row ran twice from a fresh boot with the same result. "Gap" means the scena
 | area_attacks | FAIL (gap) | The Ruins dragon boss (`Dragon_Green_BP_C`) fights A for 75 s, B in god mode kept a median 1.5 m from A. Both copies play the same boss montages (fire breath, air fireballs), but fire puddles (`Dragon_FirePuddle_C`), fireballs (`Dragon_Fireball_C`) and flame-breath projectiles exist only on A: A saw 59 + 0 + 48 / 16 + 9 + 16 of them and took 16 + 0 + 91 / 22 + 17 + 32 hits from them; B saw none and took 0 hits |
 | drops_and_xp | FAIL (gap) | A kills 10 small enemies near (3000, -2000) with `kd ehit` (4000 damage), B 1.5 m behind A. XP and `killedEnemyCounts` agree on both copies in most runs (432 / 432), but B missed one of A's kills in 3 of 12 runs (70 kills in all; run 1 here: 432 vs 422 XP). Loot is rolled on each copy: what drops differs (run 2: A got a coin, two herbs and a poison cure, B one coin), each player picks up their own copy, and nothing of it exists on the other copy |
 | enemy_hp_agree | FAIL (gap, intermittent) | A and B take turns hitting a `Mossy_Fighter_BP_C` (67.2 HP) for 3 until it dies. HP agrees on both copies after every hit (worst gap 0.0) and it dies on both at the same hit. But some of A's hits do nothing: run 1 took 23 hits with none lost, run 2 took 27, and A's hits 3, 5, 7 and 9 changed nothing on either copy. Ownership moves to the last hitter, so it flips between the players on every hit. Each lost hit was relayed to B about 3 ms before ownership flipped back to A |
+| death | PASS | A dies (`die`) 51 m from where a new game starts, with no checkpoint rested at. B sees A's knight play `Knight_Undead_Death` 1.1 s later. A gets the Game Over screen; after Continue, A's world reloads (B's doesn't) and A is back in 9.6 s at the new-game start. The session survives: each copy shows the other player again within 0.2 s, and movement syncs both ways (0 cm error). Enemies A killed before dying stay dead on both copies. One earlier trial run (1 of 4) had both puppets missing after the respawn, and movement didn't sync; it didn't happen again in the next three |
 
 In short, version 1.0.3 shares players and enemies, but no world object, pickup, checkpoint or save state, in either
 direction. Every player plays in their own world. The `WorldFlags` and `InteractRequest` messages in its protocol are
@@ -116,4 +117,4 @@ defined but never sent.
 
 ## Next scenarios
 
-See [TASKS.md](TASKS.md). Lane 1 (world, loot, saves) is measured above; Lane 2 (combat, death, network) is in progress: `ranged_attacks`, `area_attacks`, `drops_and_xp` and `enemy_hp_agree` are measured above.
+See [TASKS.md](TASKS.md). Lane 1 (world, loot, saves) is measured above; Lane 2 (combat, death, network) is in progress: `ranged_attacks`, `area_attacks`, `drops_and_xp`, `enemy_hp_agree` and `death` are measured above.

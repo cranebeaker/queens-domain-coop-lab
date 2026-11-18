@@ -603,11 +603,132 @@ def enemy_hp_agree(a, b, enemy_class="Mossy_Fighter", spot=(3000, -2000, 500), d
     return all(res["checks"].values()), res
 
 
+def safe(fn, default=None):
+    try:
+        return fn()
+    except Exception as e:   # the copy is loading a map, or the bridge is busy
+        return default if default is not None else {"error": type(e).__name__}
+
+
+def puppet_follows(mover, watcher, dx=600):
+    """`mover` steps `dx` cm; how far is `watcher`'s puppet of it from where it ended (horizontal cm)."""
+    p = local_pos(mover)
+    mover.exec(f"tp {p[0] + dx} {p[1]} {p[2] + 50} 0")
+    time.sleep(3)
+    t = local_pos(mover)
+    pups = [q for q in remote_players(watcher) if not q["hidden"]]
+    return round(min(dist(q["pos"][:2], t[:2]) for q in pups)) if pups else None
+
+
+DIE_CONTINUE = "BndEvt__DieUI_ContinueButton_K2Node_ComponentBoundEvent_4_CommonButtonBaseClicked__DelegateSignature"
+
+
+def death(a, b, wait_s=120, spot=(3000, -2000, 500)):
+    """A dies (the player Blueprint's own Kill). Shared death: B sees A's knight die, the session survives A's
+    respawn, and afterwards movement syncs both ways again. Also records where A comes back. Death opens the game's
+    Game Over screen (`DieUI`); the scenario presses its Continue button like a player would."""
+    keys = ("lastCheckpoint", "savePoint")
+    b.exec("kd god 1")   # B must not die to whatever is around
+    a.exec("kd god 0")
+    a.exec(f"tp {spot[0]} {spot[1]} {spot[2]} 0")   # away from where a new game starts
+    time.sleep(3)
+    # A kills the small enemies near the spot first: does the host's reload bring them back, and on whose copy?
+    near = lambda g: sorted(e["class"] for e in enemies(g) if e.get("hp") and e["hp"] < 200 and
+                            dist(e["pos"], spot) < 2500)
+    live = {"before_kills": {"A": near(a), "B": None}}
+    pa = local_pos(a)
+    b.exec(f"tp {pa[0] + 300} {pa[1]} {pa[2] + 50} 0")
+    time.sleep(5)
+    live["before_kills"]["B"] = near(b)
+    for e in [e for e in enemies(a) if e.get("hp") and e["hp"] < 200 and dist(e["pos"], spot) < 2500]:
+        a.exec(f"kd ehit {e['name']} 4000")
+        time.sleep(0.5)
+    time.sleep(4)
+    live["after_kills"] = {"A": near(a), "B": near(b)}
+    a.exec(f"tp {spot[0]} {spot[1]} {spot[2]} 0")
+    time.sleep(2)
+    sa = a.state(sections=["save", "player"])
+    save_before = {k: sa["save"].get(k) for k in keys}
+    died_at = sa["player"]["pos"]
+    b.exec(f"tp {died_at[0] + 300} {died_at[1]} {died_at[2] + 50} 0")   # B watches from 3 m away
+    time.sleep(3)
+    log_from = {n: len(kd_log_all(n)) for n in ("A", "B")}
+    a.exec("die")
+    t0 = time.time()
+    timeline, b_anims, a_dead_seen, back_since, continued = [], {}, False, None, None
+    while time.time() - t0 < wait_s:
+        t = round(time.time() - t0, 1)
+        ia = safe(lambda: a.eval("inworld"), False)
+        pl = safe(lambda: a.state(sections=["player"])["player"], {}) if ia else {}
+        pups = safe(lambda: remote_players(b), [])
+        anims = sorted({q.get("anim", "") for q in pups if not q["hidden"]})
+        for an in anims:
+            b_anims.setdefault(an, t)
+        row = {"t": t, "a_inworld": ia, "a_dead": pl.get("dead"), "a_world": safe(lambda: a.eval("world"), "?"),
+               "b_puppets": len([q for q in pups if not q["hidden"]]), "b_puppet_anim": anims,
+               "b_inworld": safe(lambda: b.eval("inworld"), False)}
+        if not timeline or {k: v for k, v in row.items() if k != "t"} != {k: v for k, v in timeline[-1].items()
+                                                                          if k != "t"}:
+            timeline.append(row)   # only log changes
+        a_dead_seen |= bool(pl.get("dead")) or not ia
+        if a_dead_seen and continued is None and "DieUI_C" in str(safe(lambda: a.exec("widgets DieUI_C"), "")):
+            if safe(lambda: a.exec(f"uicall DieUI_C {DIE_CONTINUE}"), None) is not None:
+                continued = t   # the Game Over screen is up: press Continue
+        if a_dead_seen and ia and pl.get("present") and not pl.get("dead"):
+            back_since = back_since or time.time()
+            if time.time() - back_since > 8:
+                break
+        else:
+            back_since = None
+        time.sleep(1)
+    back = back_since is not None
+    res = {"died_at": died_at, "save_before": save_before, "pressed_continue_at_s": continued,
+           "b_puppet_anims_seen": b_anims, "timeline": timeline}
+    if not a_dead_seen:
+        return None, {"why": "A did not die", **res}
+    if not back:
+        return False, {"why": f"A was not back in the world after {wait_s} s", **res}
+    sa = a.state(sections=["save", "player", "checkpoints"])
+    came_back = sa["player"]["pos"]
+    cps = sorted(sa["checkpoints"], key=lambda c: dist(c["pos"], came_back)) if sa["checkpoints"] else []
+    res["came_back_at"] = came_back
+    res["came_back_from_death_spot_cm"] = round(dist(came_back, died_at))
+    res["nearest_checkpoint"] = {"name": cps[0]["name"], "cm": round(dist(cps[0]["pos"], came_back))} if cps else None
+    res["save_after"] = {k: sa["save"].get(k) for k in keys}
+    res["respawn_s"] = round(back_since - t0, 1)
+    time.sleep(3)
+    # puppets: each copy should show the other player again; if not, wait up to 60 s and note when they came back
+    vis = lambda g: len([q for q in safe(lambda: remote_players(g), []) if not q["hidden"]])
+    t1, rec = time.time(), {"right_after": {"A_sees_B": vis(a), "B_sees_A": vis(b)}}
+    while (vis(a) == 0 or vis(b) == 0) and time.time() - t1 < 60:
+        time.sleep(2)
+    rec["both_visible_after_s"] = round(time.time() - t1, 1) if vis(a) and vis(b) else None
+    res["puppets_after_respawn"] = rec
+    b.exec(f"tp {spot[0] + 300} {spot[1]} {spot[2]} 0")   # B is still at the death spot; A goes back there too
+    a.exec(f"tp {spot[0]} {spot[1]} {spot[2]} 0")
+    time.sleep(5)
+    live["after_a_respawned"] = {"A": near(a), "B": near(b)}
+    res["small_enemies_within_25m"] = live
+    res["after_respawn"] = {"b_puppet_of_a_error_cm": safe(lambda: puppet_follows(a, b)),
+                            "a_puppet_of_b_error_cm": safe(lambda: puppet_follows(b, a))}
+    words = ("session", "peer", "disconnect", "timeout", "left", "joined", "world changed")
+    res["mod_log"] = {n: [l.split("] ", 2)[-1][:140] for l in kd_log_all(n)[log_from[n]:]
+                          if any(w in l.lower() for w in words) and "[smoke]" not in l][:12] for n in ("A", "B")}
+    b.exec("kd god 0")
+    death_anim = any("Death" in an for an in b_anims)
+    ar = res["after_respawn"]
+    synced = all(isinstance(v, (int, float)) and v <= 100 for v in ar.values())
+    same_world = live["after_a_respawned"]["A"] == live["after_a_respawned"]["B"]
+    res["checks"] = {"b_saw_a_die": death_anim, "session_survived_and_syncs": synced,
+                     "enemies_agree_after_reload": same_world}
+    return death_anim and synced and same_world, res
+
+
 SCENARIOS = {"movement": movement, "loot_and_world": loot_and_world, "client_loot": client_loot,
              "host_world_objects": host_world_objects, "client_world_objects": client_world_objects,
              "checkpoint": checkpoint, "rejoin": rejoin, "ranged_attacks": ranged_attacks,
              "area_attacks": area_attacks, "drops_and_xp": drops_and_xp,
-             "enemy_hp_agree": enemy_hp_agree}
+             "enemy_hp_agree": enemy_hp_agree, "death": death}
 
 
 def main(names):
