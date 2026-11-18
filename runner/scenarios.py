@@ -619,11 +619,11 @@ def drops_and_xp(a, b, spot=(3000, -2000, 500), kills=10):
 
     pk_a, pk_b = visible_pickups(a), visible_pickups(b)
     kill_at = [en["pos"] for en in targets]
-    # drops land at the enemy's feet and are spawned at run time ("<Class>_<number>"); placed pickups that stream in
-    # near a kill are not drops
+    # drops land at the enemy's feet and are spawned at run time ("<Class>_<number>", and the bridge's drop flag);
+    # placed pickups that stream in near a kill are not drops
     near_kill = lambda p: any(dist(p["pos"], k) < 800 for k in kill_at) and p["name"].startswith(p["class"] + "_")
-    new = {"A": {n: p for n, p in pk_a.items() if n not in picks_before["A"] and near_kill(p)},
-           "B": {n: p for n, p in pk_b.items() if n not in picks_before["B"] and near_kill(p)}}
+    new = {"A": {n: p for n, p in pk_a.items() if n not in picks_before["A"] and near_kill(p) and p.get("drop", True)},
+           "B": {n: p for n, p in pk_b.items() if n not in picks_before["B"] and near_kill(p) and p.get("drop", True)}}
     res = {"spot": spot, "kills": rows,
            "xp": {n: [before[n]["xp"], after[n]["xp"]] for n in ("A", "B")},
            "kill_counts": {n: after[n]["kills"] for n in ("A", "B")},
@@ -1487,6 +1487,15 @@ SUITES["laneb"] = SUITES["b1"]
 SUITES["all"] = SUITES["lane1"] + SUITES["lane2"] + SUITES["laneA"] + SUITES["laneb"]
 
 
+RESULTS_PATH = None   # set by main: the run's results file, rewritten after every scenario
+
+
+def save_results(results):
+    if RESULTS_PATH:
+        with open(RESULTS_PATH, "w", encoding="utf-8") as f:
+            json.dump(results, f, indent=1)
+
+
 def run(names, results):
     if names == ["lag"]:   # lag boots its own pairs (7 reboots, about 18 min)
         ok, info = lag(None, None)
@@ -1500,13 +1509,18 @@ def run(names, results):
             ok, info = False, {"error": repr(e)}
         verdict = "SKIP" if ok is None else "PASS" if ok else "FAIL"
         results[n] = {"result": verdict, **info}
+        save_results(results)   # a crash or a power cut keeps what ran so far
         print(f"{n:24s} {verdict}  {json.dumps(info)[:400]}", flush=True)
         if n == "rejoin" or n.endswith("_persists"):   # these replace a copy: reconnect
             a, b = rig.connect("A"), rig.connect("B")
 
 
 def main(argv):
+    global RESULTS_PATH
     results = {}
+    RESULTS_PATH = os.path.join(rig.LAB, "results", time.strftime("%Y%m%d-%H%M%S") + ".json")
+    os.makedirs(os.path.dirname(RESULTS_PATH), exist_ok=True)
+    print("results go to", RESULTS_PATH, flush=True)
     if argv and argv[0] == "--suite":
         for group in SUITES[argv[1]]:
             rig.qdlab.stop()
@@ -1518,12 +1532,9 @@ def main(argv):
         rig.qdlab.stop()
     else:
         run(argv or [n for n in SCENARIOS if n != "lag"], results)
-    out = os.path.join(rig.LAB, "results", time.strftime("%Y%m%d-%H%M%S") + ".json")
-    os.makedirs(os.path.dirname(out), exist_ok=True)
-    with open(out, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=1)
+    save_results(results)
     print("SUMMARY", json.dumps({n: r["result"] for n, r in results.items()}))
-    print("saved", out)
+    print("saved", RESULTS_PATH)
 
 
 if __name__ == "__main__":

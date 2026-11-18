@@ -32,7 +32,7 @@ WindowPosY={y}
 FullscreenMode=2
 LastConfirmedFullscreenMode=2
 PreferredFullscreenMode=2
-FrameRateLimit=60.000000
+FrameRateLimit=30.000000
 
 [ScalabilityGroups]
 sg.ResolutionQuality=50.000000

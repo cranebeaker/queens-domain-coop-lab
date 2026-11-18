@@ -15,6 +15,7 @@
 #include "SDK/EnemyBase_classes.hpp"
 #include "SDK/ItemPickup_Base_classes.hpp"
 #include "SDK/ItemPickup_Base_parameters.hpp"
+#include "SDK/CoreItemPickupActor_classes.hpp"
 #include "SDK/SavableActor_classes.hpp"
 #include "SDK/SavableActorState_structs.hpp"
 #include "SDK/Checkpoint_classes.hpp"
@@ -385,6 +386,9 @@ Value PickupsState(double radiusCm) {
         v.set("pos", Vec(p));
         v.set("dist", std::round(d));
         v.set("hidden", static_cast<bool>(a->bHidden));
+        // a loot drop (spawned by an enemy, chest or pot), as opposed to a pickup placed in the level
+        SDK::UClass* core = SDK::ACoreItemPickupActor_C::StaticClass();
+        v.set("drop", core && a->IsA(core) && static_cast<bool>(static_cast<SDK::ACoreItemPickupActor_C*>(a)->IsADrop));
         list.push(v);
     }
     return list;
