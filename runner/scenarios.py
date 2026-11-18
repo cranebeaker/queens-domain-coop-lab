@@ -714,14 +714,18 @@ def death(a, b, wait_s=120, spot=(3000, -2000, 500)):
     words = ("session", "peer", "disconnect", "timeout", "left", "joined", "world changed")
     res["mod_log"] = {n: [l.split("] ", 2)[-1][:140] for l in kd_log_all(n)[log_from[n]:]
                           if any(w in l.lower() for w in words) and "[smoke]" not in l][:12] for n in ("A", "B")}
+    # errors the mod caught (a ticker that hits an exception is removed for the rest of the session)
+    res["mod_errors"] = {n: [l.split("] ", 1)[-1].strip()[:160] for l in kd_log_all(n)[log_from[n]:] if "[ERR]" in l][:6]
+                         for n in ("A", "B")}
     b.exec("kd god 0")
     death_anim = any("Death" in an for an in b_anims)
     ar = res["after_respawn"]
     synced = all(isinstance(v, (int, float)) and v <= 100 for v in ar.values())
     same_world = live["after_a_respawned"]["A"] == live["after_a_respawned"]["B"]
+    no_errors = not any(res["mod_errors"].values())
     res["checks"] = {"b_saw_a_die": death_anim, "session_survived_and_syncs": synced,
-                     "enemies_agree_after_reload": same_world}
-    return death_anim and synced and same_world, res
+                     "enemies_agree_after_reload": same_world, "no_mod_errors": no_errors}
+    return death_anim and synced and same_world and no_errors, res
 
 
 def host_leaves(a, b, spot=(3000, -2000, 500), after_s=60):
