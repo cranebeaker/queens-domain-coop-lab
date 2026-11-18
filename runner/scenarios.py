@@ -811,16 +811,77 @@ def host_leaves(a, b, spot=(3000, -2000, 500), after_s=60):
     return all(checks.values()), res
 
 
+LAG_RUNS = ("movement", "ranged_attacks", "area_attacks", "drops_and_xp", "enemy_hp_agree", "death", "host_leaves")
+# what each scenario gives on the plain loopback link (two fresh runs each, see README): lag is judged against it
+LAN_VERDICT = {"movement": "PASS", "ranged_attacks": "FAIL", "area_attacks": "FAIL", "drops_and_xp": "FAIL",
+               "enemy_hp_agree": "PASS or FAIL", "death": "PASS", "host_leaves": "PASS"}
+
+
+def lag_summary(name, info):
+    """The few numbers of each scenario worth comparing with and without lag."""
+    g = lambda *ks: {k: info.get(k) for k in ks if k in info}
+    if "why" in info or "error" in info:
+        return g("why", "error")
+    if name == "movement":
+        return g("puppet_error_cm")
+    if name == "ranged_attacks":
+        return {s: {"projectiles_seen": sum(c["count"] for c in info[s]["watched"].values()),
+                    "hits_with_projectile_close": info[s]["hits_with_watched_actor_close"]} for s in ("a", "b")}
+    if name == "area_attacks":
+        return {s: {"area_actors_seen": sum(v["count"] for v in info[s]["actors"].values() if v["kind"] == "area"),
+                    "hits": info[s]["hits"]} for s in ("a", "b")}
+    if name == "drops_and_xp":
+        return {"xp": info["xp"], **info["checks"]}
+    if name == "enemy_hp_agree":
+        return {**g("hits", "worst_hp_gap", "hits_that_did_nothing", "died_at_hit"), **info["checks"]}
+    if name == "death":
+        return {**g("respawn_s", "puppets_after_respawn", "after_respawn"), **info["checks"]}
+    if name == "host_leaves":
+        return {**g("b_noticed_host_gone_after_s", "b_puppet_of_a_gone_after_s"), **info["checks"]}
+    return {}
+
+
+def lag(a, b, names=LAG_RUNS):
+    """Scenarios 7 to 12 (and movement) again, each from a fresh pair whose client joins through the Co-op Anything
+    hub's chaos relay: 25 +/- 25 ms each way and 2 % loss (50 to 150 ms round trip). Lag must not make anything
+    worse: a scenario that passes on the plain link must still pass, and the mod's own ping must show the lag."""
+    out, worse = {}, []
+    for n in names:
+        rig.qdlab.stop()
+        rig.stop_relay()
+        try:
+            a2, b2 = rig.pair(lag=True)
+            ok, info = SCENARIOS[n](a2, b2)
+        except Exception as e:
+            ok, info = False, {"error": repr(e)}
+        verdict = "SKIP" if ok is None else "PASS" if ok else "FAIL"
+        pings = [l.split("worst ping ")[-1].strip() for l in kd_log_all("B") if "worst ping" in l]
+        stats = safe(lambda: rig.chaos_call("stats"), {})
+        relay = {d: {k: v for k, v in stats.get(d, {}).items() if k in ("seen", "forwarded", "dropped")}
+                 for d in ("c2s", "s2c") if isinstance(stats, dict)}
+        out[n] = {"result": verdict, "lan": LAN_VERDICT[n], "b_worst_ping": pings[-1] if pings else None,
+                  "relay": relay, **lag_summary(n, info)}
+        print(f"  lag/{n:15s} {verdict}  {json.dumps(out[n])}", flush=True)
+        if LAN_VERDICT[n] == "PASS" and verdict != "PASS":
+            worse.append(n)
+    rig.qdlab.stop()
+    rig.stop_relay()
+    out["worse_than_lan"] = worse
+    return not worse, out
+
+
 SCENARIOS = {"movement": movement, "loot_and_world": loot_and_world, "client_loot": client_loot,
              "host_world_objects": host_world_objects, "client_world_objects": client_world_objects,
              "checkpoint": checkpoint, "rejoin": rejoin, "ranged_attacks": ranged_attacks,
              "area_attacks": area_attacks, "drops_and_xp": drops_and_xp,
-             "enemy_hp_agree": enemy_hp_agree, "death": death, "host_leaves": host_leaves}
+             "enemy_hp_agree": enemy_hp_agree, "death": death, "host_leaves": host_leaves,
+             "lag": lag}
 
 
 def main(names):
-    names = names or list(SCENARIOS)
-    a, b = rig.connect("A"), rig.connect("B")
+    names = names or [n for n in SCENARIOS if n != "lag"]   # lag reboots the pair 7 times: ask for it by name
+    # lag boots its own pairs; everything else runs against the pair that is up
+    a, b = (None, None) if names == ["lag"] else (rig.connect("A"), rig.connect("B"))
     results = {}
     for n in names:
         try:

@@ -31,7 +31,7 @@ client can walk through a gate the host opened (needs a movement check, not just
 | 10 | `enemy_hp_agree` (done, gap) | hit an enemy from both sides: HP and death agree on both copies, but some host hits relayed to the client owner are lost as ownership flips |
 | 11 | `death` (done, pass) | A dies: B sees the death animation, the session survives A's reload, A comes back at its save point (new-game start without a checkpoint) |
 | 12 | `host_leaves` (done, pass) | stop A mid-fight: B notices in ~11 s, ends the session cleanly, takes the enemies over and keeps playing |
-| 13 | `lag` | rerun 7 to 12 through the Co-op Anything hub's `tools/chaos` relay (50 to 150 ms, 2% loss) |
+| 13 | `lag` (done) | rerun 7 to 12 through the hub's chaos relay: same gaps, more missed kills and lost hits, and the host's player sync can die in the reload after death |
 
 ## Rules
 

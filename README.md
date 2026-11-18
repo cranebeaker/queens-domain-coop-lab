@@ -51,6 +51,11 @@ py -3 -I runner/scenarios.py         # runs every scenario against the running p
 py -3 -I runner/rig.py stop          # kills the lab copies (never the real game)
 ```
 
+Bad network: `rig.py pair --lag` puts the [Co-op Anything](https://github.com/cranebeaker/coop-anything) hub's
+`tools/chaos` relay between B and A's UDP port, with 25 +/- 25 ms each way and 2 % loss (50 to 150 ms round trip). Clone
+the hub next to this repo (`..\coop-anything`) or set `QD_HUB`. `scenarios.py lag` reruns scenarios 7 to 12 (and
+movement) that way, each from a fresh pair; it is not part of the default run. `rig.py stop` also stops the relay.
+
 Poke a copy by hand:
 
 ```
@@ -96,6 +101,7 @@ Each row ran twice from a fresh boot with the same result. "Gap" means the scena
 | enemy_hp_agree | FAIL (gap, intermittent) | A and B take turns hitting a `Mossy_Fighter_BP_C` (67.2 HP) for 3 until it dies. HP agrees on both copies after every hit (worst gap 0.0) and it dies on both at the same hit. But some of A's hits do nothing: run 1 took 23 hits with none lost, run 2 took 27, and A's hits 3, 5, 7 and 9 changed nothing on either copy. Ownership moves to the last hitter, so it flips between the players on every hit. Each lost hit was relayed to B about 3 ms before ownership flipped back to A |
 | death | PASS | A dies (`die`) 51 m from where a new game starts, with no checkpoint rested at. B sees A's knight play `Knight_Undead_Death` 1.1 s later. A gets the Game Over screen; after Continue, A's world reloads (B's doesn't) and A is back in 9.6 s at the new-game start. The session survives: each copy shows the other player again within 0.2 s, and movement syncs both ways (0 cm error). Enemies A killed before dying stay dead on both copies. One earlier trial run (1 of 4) had both puppets missing after the respawn, and movement didn't sync; it didn't happen again in the next three |
 | host_leaves | PASS | Mid-fight near (3000, -2000) (the host owns 99 enemies), A's game is killed. B removes A's knight after 4.0 s and notices after 10.7 / 10.8 s (`disconnected (host lost)`). It shows "The host left" and "Co-op failed: host lost", ends the session cleanly, takes over the ~59 enemies it was following and scales their HP back for 1 player. B stays in its world: the enemies keep fighting (42 / 44 hits on B in the next minute, 4 of 5 / 4 of 6 moved), and B's own hit still kills |
+| lag | PASS / FAIL (pass 2: `death` broke) | Scenarios 7 to 12 and movement again, B joining through the hub's chaos relay (25 +/- 25 ms each way, 2 % loss; the relay dropped 2 to 2.5 % each way, B's mod logged a worst ping of 220 to 1000 ms). Two passes: movement 0 / 0 cm; `ranged_attacks` and `area_attacks` the same gaps (B sees 0 projectiles / area actors); `host_leaves` PASS / PASS (B notices after 10.7 s). Worse with lag: `drops_and_xp` B missed 4 kills in pass 1 (318 vs 432 XP) and 1 in pass 2; `enemy_hp_agree` FAIL / PASS (pass 1: HP 3.0 apart once, 4 host hits lost). `death` PASS / FAIL: in pass 2 the host's mod caught an access violation in its `playersync` ticker during the reload after death and removed the ticker, so neither copy showed the other player for the rest of the session. That is most likely also the unconfirmed `death` failure on the plain link |
 
 In short, version 1.0.3 shares players and enemies, but no world object, pickup, checkpoint or save state, in either
 direction. Every player plays in their own world. The `WorldFlags` and `InteractRequest` messages in its protocol are
@@ -118,4 +124,4 @@ defined but never sent.
 
 ## Next scenarios
 
-See [TASKS.md](TASKS.md). Lane 1 (world, loot, saves) is measured above; Lane 2 (combat, death, network) is in progress: `ranged_attacks`, `area_attacks`, `drops_and_xp`, `enemy_hp_agree`, `death` and `host_leaves` are measured above.
+See [TASKS.md](TASKS.md). Lane 1 (world, loot, saves) is measured above; Lane 2 (combat, death, network) is in progress: `ranged_attacks`, `area_attacks`, `drops_and_xp`, `enemy_hp_agree`, `death`, `host_leaves` and `lag` are measured above: Lane 2 is done.

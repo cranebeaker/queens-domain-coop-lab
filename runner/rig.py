@@ -1,13 +1,19 @@
 """Two-copy rig for Knights' Domain tests. Run with: py -3 -I runner/rig.py <command>
 
   boot <A|B> [--host | --join] [--slot N]   launch a copy with the dev mod and the bridge, start a new game
-  pair                                       boot A as host and B as client (UDP loopback) and print both states
+  pair [--lag]                               boot A as host and B as client (UDP loopback) and print both states;
+                                             --lag puts the hub's chaos relay between them (see LAG below)
   state <A|B> [section ...]                  print the bridge state of a running copy
   exec <A|B> <line>                          run a bridge command (newgame, tp, call, kd <mod dev command>, ...)
   stop                                       kill every lab copy
 
 Copy A uses bridge port 27990 and mod profile 1 (host). Copy B uses 27991 and profile 2 (client).
+
+LAG: the Co-op Anything hub's tools/chaos relay (clone the hub next to this repo, or set QD_HUB to it) listens in
+front of the host's UDP port and B joins through it. Each direction gets 25 +/- 25 ms and 2 % loss, so a round trip
+takes 50 to 150 ms. The relay's info and packet log go to results/chaos/ (ignored by git).
 """
+import subprocess
 import json
 import os
 import shutil
@@ -20,6 +26,12 @@ sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(LAB, "third_party", "coopbridge"))
 
 import qdlab  # noqa: E402
+
+HUB = os.environ.get("QD_HUB") or os.path.join(os.path.dirname(LAB), "coop-anything")
+CHAOS = os.path.join(HUB, "tools", "chaos", "chaos.py")
+CHAOS_DIR = os.path.join(LAB, "results", "chaos")
+CHAOS_INFO = os.path.join(CHAOS_DIR, "info.json")
+LAG = {"latency_ms": 25, "jitter_ms": 25, "loss": 0.02}   # per direction: 50 to 150 ms round trip, 2 % loss
 from bridge_client import Bridge  # noqa: E402
 
 BRIDGE_DLL = os.path.join(LAB, "bridge", "build", "Release", "qdbridge.dll")
@@ -50,17 +62,17 @@ def wait_until(fn, timeout, step=1.0, what="condition"):
     raise TimeoutError(f"timed out waiting for {what} (last: {last})")
 
 
-def mod_args(name, role):
+def mod_args(name, role, join_port=None):
     args = ["-qdcoop-transport=udp", f"-qdcoop-profile={PROFILES[name]}", f"-qdbridge-port={PORTS[name]}"]
     if role == "host":
         args += ["-qdcoop-autohost", f"-qdcoop-udp-port={KD_UDP_PORT}"]
     elif role == "join":
-        args += [f"-qdcoop-autojoin=127.0.0.1:{KD_UDP_PORT}"]
+        args += [f"-qdcoop-autojoin=127.0.0.1:{join_port or KD_UDP_PORT}"]
     return args
 
 
-def boot(name, role=None, slot=0):
-    pid = qdlab.launch(name, mod_args(name, role))
+def boot(name, role=None, slot=0, join_port=None):
+    pid = qdlab.launch(name, mod_args(name, role, join_port))
     log(f"{name}: launched pid {pid}")
     time.sleep(8)
     dll = os.path.join(qdlab.COPIES, name, "qdbridge.dll")   # inject a copy so the build output never stays locked
@@ -84,6 +96,50 @@ def boot(name, role=None, slot=0):
     return g
 
 
+def chaos_call(method, params="{}"):
+    info = json.load(open(CHAOS_INFO, encoding="utf-8"))
+    out = subprocess.run([sys.executable, "-I", CHAOS, "call", "--rpc-port", str(info["rpc"]), method, params],
+                         capture_output=True, text=True, timeout=20)
+    if out.returncode:
+        raise RuntimeError(f"chaos {method}: {out.stderr.strip()[-300:]}")
+    return json.loads(out.stdout)
+
+
+def start_relay():
+    """Start the chaos relay in front of the host's UDP port with the LAG settings; returns the port B joins."""
+    if not os.path.isfile(CHAOS):
+        sys.exit(f"no chaos relay at {CHAOS}: clone https://github.com/cranebeaker/coop-anything next to this repo "
+                 "or set QD_HUB")
+    stop_relay()
+    os.makedirs(CHAOS_DIR, exist_ok=True)
+    subprocess.Popen([sys.executable, "-I", CHAOS, "relay", "--target", f"127.0.0.1:{KD_UDP_PORT}",
+                      "--profile", "lan", "--info-file", CHAOS_INFO, "--log", os.path.join(CHAOS_DIR, "run.jsonl")],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    wait_until(lambda: os.path.isfile(CHAOS_INFO), 20, step=0.5, what="chaos relay")
+    chaos_call("set_params", json.dumps({"params": LAG}))
+    port = json.load(open(CHAOS_INFO, encoding="utf-8"))["listen"]
+    log(f"chaos relay on udp {port} -> {KD_UDP_PORT}: {LAG}")
+    return port
+
+
+def stop_relay():
+    if os.path.isfile(CHAOS_INFO):
+        try:
+            chaos_call("shutdown")
+        except Exception:
+            pass
+        os.remove(CHAOS_INFO)
+        time.sleep(1)
+
+
+def pair(lag=False):
+    a = boot("A", "host")
+    b = boot("B", "join", join_port=start_relay() if lag else None)
+    time.sleep(10)
+    return a, b
+
+
 def kd_log(name, lines=30):
     p = os.path.join(qdlab.mod_saved(name, PROFILES[name]), "KnightsDomain.log")
     if not os.path.isfile(p):
@@ -98,6 +154,7 @@ def main(argv):
     cmd = argv[0]
     if cmd == "stop":
         qdlab.stop()
+        stop_relay()
     elif cmd == "boot":
         name = argv[1]
         role = "host" if "--host" in argv else "join" if "--join" in argv else None
@@ -105,9 +162,7 @@ def main(argv):
         g = boot(name, role, slot)
         print(json.dumps(g.state(sections=["player"]), indent=1))
     elif cmd == "pair":
-        a = boot("A", "host")
-        b = boot("B", "join")
-        time.sleep(10)
+        a, b = pair(lag="--lag" in argv)
         for n, g in (("A", a), ("B", b)):
             print(n, json.dumps(g.state(sections=["player"])))
             print("".join(kd_log(n, 12)))
