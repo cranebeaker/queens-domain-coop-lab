@@ -1,48 +1,65 @@
 # Tasks
 
-Goal: measure exactly what Knights' Domain shares between players and what it doesn't, with scenarios that run on
-real game copies, so we can send its author precise bug reports (and later decide whether to build world sync).
+Round 1 measured Knights' Domain; round 2 makes the whole game shared. The code lives in our fork of the mod,
+[cranebeaker/KnightsDomain](https://github.com/cranebeaker/KnightsDomain), branch `world-sync` (offered to the author
+as a pull request when it is done). This repository keeps the test rig, the scenarios and the tools.
 
-Each task is one scenario in `runner/scenarios.py` (plus any bridge commands it needs in `bridge/qdbridge.cpp`).
-A scenario passes when the co-op behaviour is right, so a gap shows up as FAIL with the numbers that prove it.
-Run every scenario at least twice before calling a result.
+## Round 2: the whole game in co-op
 
-## Lane 1 (owner): world, loot, saves (done)
+### What is already in `world-sync` (passing in the rig, two players, Ruins)
 
-All measured: two clean runs of `py -3 -I runner/scenarios.py --suite lane1`, identical. Details in the README.
-
-| # | Scenario | Result |
+| System | Code | Scenarios |
 |---|---|---|
-| 1 | `loot_and_world` | gap: a host pickup never reaches the client |
-| 2 | `client_loot` | gap: a client pickup never reaches the host |
-| 3 | `host_world_objects`, `client_world_objects` | gap: chest, secret wall, door, keyed door, lift, barrel, barricade change for the user only |
-| 4 | `host_gate`, `client_gate` | gap: a lever opens the gate for the puller only; the other player is physically blocked |
-| 5 | `checkpoint`, `client_checkpoint` | gap: resting (checkpoint, visited list, teleport points) is saved for the rester only |
-| 6 | `story_flags` | gap: story counters and the saved world differ after the host's actions |
-| 7 | `rejoin` | gap: a rejoining client gets a fresh world |
-| 8 | `client_progress_persists` | works: the client's own items and checkpoint survive save and reload |
+| World objects, pickups, gates, lifts, breakables | `sync/WorldSync.cpp` | `loot_and_world`, `client_loot`, `host_world_objects`, `client_world_objects`, `host_gate`, `client_gate` |
+| Story counters, checkpoints, teleporters, rejoin | `sync/WorldSync.cpp` | `checkpoint`, `client_checkpoint`, `story_flags`, `rejoin`, `client_progress_persists` |
+| Enemy projectiles and area attacks | `sync/HazardSync.cpp` | `ranged_attacks` (pass), `area_attacks` (being fixed) |
+| Loot rolled once, picked up once | `sync/HazardSync.cpp`, `sync/WorldSync.cpp` | `drops_and_xp` |
+| Player sync survives the crash after a death | `sync/PlayerSync.cpp` | `death`, `lag` |
 
-## Lane 2 (friend): combat, death, network (done)
+Every world change in the game goes through the save's `SavableActorStates` and `NamedSaveData`, which WorldSync
+mirrors, so those rows hold for every area, not only the Ruins.
 
-| # | Scenario | What to measure |
+### How to find work: the Blueprint index
+
+`py -3 -I runner/setup.py decompile` decompiles every Blueprint of your copy to text in `tools/ue/bp` and writes
+`tools/ue/bp_index.md`: per Blueprint, the calls that assume one player (`player0`), write the save, pause, play
+cutscenes, stream levels, spawn actors or roll random numbers. Read the Blueprint's text before changing anything
+about it: it is the game's real logic. Never commit anything under `tools/ue`.
+
+### Lane A (owner): systems
+
+| # | Task | Start from |
 |---|---|---|
-| 7 | `ranged_attacks` (done, gap) | archers shooting at A: B sees the bow animation but no arrow, and is never hit standing in the line of fire (their open issue 2) |
-| 8 | `area_attacks` (done, gap) | Ruins dragon boss: fire puddles, fireballs and flame breath exist and hit only on the targeted player. Water vortex and whale splash are in later levels, not measured yet |
-| 9 | `drops_and_xp` (done, gap) | A kills an enemy (`kd ehit`): XP and kill counts agree (B sometimes misses a kill), but each copy rolls its own loot and each player picks up their own |
-| 10 | `enemy_hp_agree` (done, gap) | hit an enemy from both sides: HP and death agree on both copies, but some host hits relayed to the client owner are lost as ownership flips |
-| 11 | `death` (done, pass) | A dies: B sees the death animation, the session survives A's reload, A comes back at its save point (new-game start without a checkpoint) |
-| 12 | `host_leaves` (done, pass) | stop A mid-fight: B notices in ~11 s, ends the session cleanly, takes the enemies over and keeps playing |
-| 13 | `lag` (done) | rerun 7 to 12 through the hub's chaos relay: same gaps, more missed kills and lost hits, and the host's player sync can die in the reload after death |
+| A1 | `area_attacks` passes: the boss's fire hurts the other player too | `Enemies/Dragon/*`, `Enemies/Fisher_00/.../Fisher_SZ_FirePuddle` |
+| A2 | Cutscenes play for everyone: who starts one, what the others see, nobody stuck | `Cutscenes/CutsceneManagerBase`, `Cutscenes/RitualCutscene`, `Cutscenes/Ending1..4`, `RuinsLevel/Intro/Sequences` |
+| A3 | Trigger volumes that set story state or quests fire once for the party | `Blueprints/ActivationTrigger`, `NamedSaveDataSetterVolume`, `ChallengeCompleteVolume`, `QuestForceUpdateVolume`, `ActivatableNamedSaveDataSetter` |
+| A4 | NPC dialogue and turn-ins agree on both machines | `NPCs/*` (Chef eggs, Fish Wife, Librarian, Knight NPCs), `Blueprints/DialogueManager` |
+| A5 | Pause and rest: no player freezes the other | `LD45/Blueprints/Base_LD45_GM`, `Player/FS_PlayerChar`, checkpoint rest |
+| A6 | Pull request to the author once A1 to A5 and Lane B pass | |
 
-Both lanes were rerun on Knights' Domain 1.0.6 on 2026-11-18 (`--suite all` twice, `lag` twice): same results,
-except that `enemy_hp_agree` now passes (lost hits fixed) and no kill was missed. See the README.
+### Lane B (friend): bosses and the later areas
 
-## Rules
+For each boss and miniboss: how it wakes, whether it locks an arena, its phases, its special attacks (spawned actors
+go through HazardSync already), its death and its reward (`*_DummyNPC.PickupCurrentReward`). Make it right for both
+players, then add a scenario that teleports both players to it and fights it with `kd god 1` / `kd ehit`.
 
-- Never change Knights' Domain's code, and never commit or share a build of it. Its licence allows building it for
-  your own use only. Our code lives in `bridge/` and `runner/`.
-- Never commit game files, the SDK dump, saves, logs with your username or paths with your username. `.gitignore`
-  covers the usual places; check `git status` before every commit.
+| # | Area | Bosses and minibosses (folders under `Enemies/`) |
+|---|---|---|
+| B1 | Library, Mausoleum | `Necronomicon`, `Boner_00/.../ShrineBoss`, `Boner_ExecutionerMiniboss`, `LostLibrarian` |
+| B2 | Aqua Ruins, Stone Garden | `WhaleKing` (water vortex, splash ring, poison circle), `FishManer_00` boss, `FishWifeEvil`, `Golem` |
+| B3 | Secret zones | `Dragon/Dragon_ROS`, `JosamiKnight_00/DesBoss`, `Cocker_00`, `Ribber_00` boss, `RoyalDuo`, `BlackRobotDuo`, `BloodPoolDuo` |
+| B4 | Other World, Castle | `JosamiLord` (and Blood Sisters), `Queen`, `DemonBosses` (fight controller, spider, hellbat), `MechaKnight`, `Sipeha` |
+| B5 | Arena locks and boss doors in the level | `RuinsLevel/Library/BossDoor`, `RuinsLevel/AquaRuins`, `AquaBossExitDoor`, `RuinsLevel/ForbiddenDoors` |
+
+### Rules
+
+- Code goes to `cranebeaker/KnightsDomain` branch `world-sync` as pull requests (one task per PR, the scenario's
+  output from two runs pasted in). Rig and scenarios go to this repository as pull requests.
+- Never commit game files, decompiled Blueprints, the SDK dump, saves, logs, or paths with your username.
 - Test windows go on your second monitor (edit `MON_X` / `MON_Y` in `runner/qdlab.py` for your screens).
-- One scenario per pull request, with the scenario's output pasted in the PR (two runs).
-- Draft bug reports for Knights' Domain in your PR first, so both of us agree on them before anyone posts.
+- After a change, run your own scenarios; the full suite (`--suite all`, then `lag`) runs before a merge.
+
+## Round 1 (done): what Knights' Domain 1.0.6 shared on its own
+
+Lane 1 (world, loot, saves) and Lane 2 (combat, death, network) are recorded in the README. In short: players and
+enemies were shared; world objects, pickups, checkpoints, story state, projectiles, area attacks and loot were not.

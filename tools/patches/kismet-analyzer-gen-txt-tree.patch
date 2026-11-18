@@ -1,0 +1,51 @@
+diff --git a/Program.cs b/Program.cs
+index 98fa5cf..c262fb5 100644
+--- a/Program.cs
++++ b/Program.cs
+@@ -118,6 +118,12 @@ public class Program
+         genCfgTree.SetHandler(GenCfgTree, ueVersion, mappings, assetInputDirectory, cfgOutputDiretory, projectName, dotPath, showProgress);
+         rootCommand.AddCommand(genCfgTree);
+ 
++        var genTxtTree = new Command("gen-txt-tree", "Decompile every asset under a folder to text (no graphviz)");
++        genTxtTree.Add(assetInputDirectory);
++        genTxtTree.Add(cfgOutputDiretory);
++        genTxtTree.SetHandler(GenTxtTree, ueVersion, mappings, assetInputDirectory, cfgOutputDiretory);
++        rootCommand.AddCommand(genTxtTree);
++
+         var genJsonTree = new Command("gen-json-tree", "Generate JSON representation of assets");
+         genJsonTree.Add(assetInputDirectory);
+         genJsonTree.Add(jsonOutputDiretory);
+@@ -221,6 +227,33 @@ Leading underscores can be used to work around special function names being ille
+ 
+         OpenUrl(outputPath);
+     }
++    static void GenTxtTree(EngineVersion ueVersion, string? mappings, string inputDir, string outputDir)
++    {
++        int ok = 0, failed = 0, skipped = 0;
++        foreach (var assetPath in Directory.EnumerateFiles(inputDir, "*.uasset", SearchOption.AllDirectories))
++        {
++            try
++            {
++                UAsset asset = LoadAsset(ueVersion, mappings, assetPath);
++                bool hasCode = false;
++                foreach (var e in asset.Exports) if (e is FunctionExport) { hasCode = true; break; }
++                if (!hasCode) { skipped++; continue; }
++                var rel = Path.GetRelativePath(inputDir, assetPath);
++                var outPath = Path.Join(outputDir, Path.ChangeExtension(rel, ".txt"));
++                Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
++                using var output = new StreamWriter(outPath);
++                new SummaryGenerator(asset, output, StreamWriter.Null).Summarize();
++                ok++;
++            }
++            catch (Exception ex)
++            {
++                failed++;
++                Console.Error.WriteLine($"{assetPath}: {ex.GetType().Name}: {ex.Message}");
++            }
++        }
++        Console.WriteLine($"decompiled {ok}, no code {skipped}, failed {failed}");
++    }
++
+     static void GenCfg(EngineVersion ueVersion, string? mappings, string assetPath, string outputDir)
+     {
+         UAsset asset = LoadAsset(ueVersion, mappings, assetPath);

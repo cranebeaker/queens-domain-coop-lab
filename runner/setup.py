@@ -3,8 +3,9 @@
   copies [<game dir>]   make test copies A and B of your Steam install (B hard-links the big files, ~150 MB extra)
   dumper                clone Dumper-7 at the pinned commit into tools/Dumper-7, patch the build, build it
   sdk                   boot copy A, inject Dumper-7, move the dump to sdk/CppSDK, stop A
-  kd                    clone Knights' Domain's source branch next to this repo, build its dev flavour, install it
-                        into the copies (allowed by its licence for your own use; never commit or share the build)
+  kd                    clone Knights' Domain next to this repo (our fork's world-sync branch, which adds world,
+                        attack and loot sync; QD_KD_UPSTREAM=1 for the author's source branch instead), build its dev
+                        flavour and install it into both copies
   bridge                build bridge/qdbridge.dll
   decompile             build repak + kismet-analyzer into tools/ue, unpack copy A's pak there, decompile every
                         Blueprint to text (tools/ue/bp) and write the co-op index (tools/ue/bp_index.md). Needs Rust
@@ -28,7 +29,10 @@ import qdlab  # noqa: E402
 DEFAULT_GAME = r"C:\Program Files (x86)\Steam\steamapps\common\QueensDomain"
 DUMPER_URL = "https://github.com/Encryqed/Dumper-7.git"
 DUMPER_COMMIT = "2c1eae303f3d775f6f59aee6e95990d9ce2e1966"
-KD_URL = "https://github.com/Lotisphere/KnightsDomain.git"
+KD_URL = "https://github.com/cranebeaker/KnightsDomain.git"
+KD_BRANCH = "world-sync"
+KD_UPSTREAM_URL, KD_UPSTREAM_BRANCH = "https://github.com/Lotisphere/KnightsDomain.git", "source"
+KA_COMMIT = "e8982e99d628c92a43f2109c0f604c0d4061c6dd"
 KD_DIR = os.path.join(os.path.dirname(LAB), "knights-domain")
 SDK_DIR = os.path.join(LAB, "sdk")
 
@@ -137,10 +141,12 @@ def patch_sdk_offsets():
 
 
 def step_kd():
+    upstream = os.environ.get("QD_KD_UPSTREAM") == "1"
+    url, branch = (KD_UPSTREAM_URL, KD_UPSTREAM_BRANCH) if upstream else (KD_URL, KD_BRANCH)
     if not os.path.isdir(KD_DIR):
-        run(["git", "clone", "-b", "source", KD_URL, KD_DIR])
+        run(["git", "clone", "-b", branch, url, KD_DIR])
     else:
-        run(["git", "pull", "--ff-only"], cwd=KD_DIR)   # the author updates the source branch after releases
+        run(["git", "pull", "--ff-only"], cwd=KD_DIR)
     patch_sdk_offsets()
     qdlab.stop()
     sdk = os.path.join(SDK_DIR, "CppSDK").replace("\\", "/")
@@ -170,6 +176,9 @@ def step_decompile():
     ka_src, ka_bin = os.path.join(UE_DIR, "ka"), os.path.join(UE_DIR, "ka-bin")
     if not os.path.isdir(ka_src):
         run(["git", "clone", "--recursive", KA_GIT, ka_src])
+        run(["git", "checkout", "-q", KA_COMMIT], cwd=ka_src)
+        # adds gen-txt-tree: text only, no graphviz, keeps going past assets it cannot read
+        run(["git", "apply", os.path.join(LAB, "tools", "patches", "kismet-analyzer-gen-txt-tree.patch")], cwd=ka_src)
     if not os.path.isfile(os.path.join(ka_bin, "kismet-analyzer.exe")):
         run(["dotnet", "build", "-c", "Release", "-o", ka_bin], cwd=ka_src)
     unpacked = os.path.join(UE_DIR, "unpacked")
@@ -178,8 +187,8 @@ def step_decompile():
         run([repak, "unpack", "-q", "-o", unpacked, pak])
     bp = os.path.join(UE_DIR, "bp")
     os.makedirs(bp, exist_ok=True)
-    run([os.path.join(ka_bin, "kismet-analyzer.exe"), "gen-cfg-tree", os.path.join(unpacked, "QueensDomain", "Content"),
-         bp, "QueensDomain"])
+    run([os.path.join(ka_bin, "kismet-analyzer.exe"), "gen-txt-tree", os.path.join(unpacked, "QueensDomain", "Content"),
+         bp])
     run([sys.executable, "-I", os.path.join(LAB, "tools", "bpindex.py"), bp, os.path.join(UE_DIR, "bp_index.md")])
 
 
