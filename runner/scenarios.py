@@ -1079,11 +1079,13 @@ def named(g, *words):
 def ensure_boss(a, b, cls, spawner, wait_s=20):
     """The boss exists on both copies; a spawner that has not spawned it yet (quest conditions, distance) is told to
     on the host, which decides spawns for everyone."""
-    if not boss_of(a, cls):
+    def here(g):   # hidden too: some bosses stay hidden until their intro (the Whaleking)
+        return any(cls in x["class"] for x in actors(g, cls))
+    if not here(a):
         a.exec(f"callon {spawner} Force Respawn")
     end = time.time() + wait_s
     while time.time() < end:
-        if boss_of(a, cls) and boss_of(b, cls):
+        if here(a) and here(b):
             return True
         time.sleep(1)
     return False
@@ -1127,7 +1129,7 @@ def kill(a, cls, tries=60, dmg=4000):
     return tries
 
 
-def talk_reward(g, boss_name, presses=25):
+def talk_reward(g, boss_name, presses=25, boss_end=None):
     """The local player talks to its own copy of a defeated boss and clicks through the reward dialogue; then the
     dialogue's own end runs (what leaving the conversation does), which is when the boss really dies."""
     inv0 = dict(save(g).get("inventory") or {})
@@ -1146,6 +1148,11 @@ def talk_reward(g, boss_name, presses=25):
                 break
             except Exception:
                 pass
+    if boss_end:   # bosses whose own event ends the talk (the Evil Fishwife's DoneSpeaking)
+        try:
+            g.exec(f"callon {boss_name} {boss_end}")
+        except Exception:
+            pass
     time.sleep(4)
     inv = dict(save(g).get("inventory") or {})
     return {k: (inv0.get(k), v) for k, v in inv.items() if inv0.get(k) != v}
@@ -1327,6 +1334,192 @@ def lost_librarian(a, b):
     return all(checks.values()), res
 
 
+def calls_follow(log_from, words):
+    """Calls the host's BossSync sent whose function starts with one of `words`, and the ones the client ran."""
+    sent = [ln.split("[bosssync] sent ")[1].split(" (")[0] for ln in kd_log_all("A")[log_from["A"]:]
+            if "[bosssync] sent " in ln]
+    ran = [ln.split("[bosssync] ran ")[1].split(" on ")[0] for ln in kd_log_all("B")[log_from["B"]:]
+           if "[bosssync] ran " in ln]
+    return [x for x in sent if x.startswith(words)], [x for x in ran if x.startswith(words)]
+
+
+def suspended_boss_end(a, b, cls, res, checks, reward_counter, boss_end=None):
+    """Bosses that kneel when beaten: each player talks to their own copy and gets the same reward, and each keeps
+    their own reward counter."""
+    res["kill_hits"] = kill(a, cls)
+    time.sleep(6)
+    res["after_kill"] = both(lambda g: boss_of(g, cls), a, b)
+    checks["defeated_both"] = all(x and (x["dead"] or x["suspended"]) for x in res["after_kill"].values())
+    for who, g in (("a", a), ("b", b)):
+        x = res["after_kill"][who]
+        res[f"reward_{who}"] = talk_reward(g, x["name"], boss_end=boss_end) if x else {}
+    checks["reward_each"] = bool(res["reward_a"]) and set(res["reward_a"]) == set(res["reward_b"])
+    time.sleep(4)
+    counters = [named(g, reward_counter).get(reward_counter) for g in (a, b)]
+    res["reward_counters"] = counters
+    checks["own_reward_counter_each"] = counters[0] == counters[1] and (counters[0] or 0) >= 1
+
+
+def whaleking(a, b):
+    """Whaleking (Aqua Ruins depths). The CLIENT wakes it: it rises and shows on both copies; its bites, slams and tail
+    slaps hit each player it fights (montage hitboxes and its own stomp checks); every water, poison and horn change
+    of the host's copy runs on the client's; it lies defeated on both, each player gets the reward from their own copy
+    and both saves have WhaleKingIsDead."""
+    cls, spawner = "Whaleking_Boss_BP", "WhaleKingSpawner"
+    boss_scenario_start(a, b, (-2470, -9502, -4200), (-2300, -9502, -4200))
+    if not ensure_boss(a, b, cls, spawner):
+        return None, {"why": "the Whaleking is not on both copies"}
+    res, checks = {}, {}
+    log_from = {n: len(kd_log_all(n)) for n in ("A", "B")}
+    b.exec(f"kd ewake {cls}")
+    time.sleep(15)   # its intro
+    res["after_start"] = both(lambda g: boss_of(g, cls), a, b)
+    checks["boss_awake_both"] = all(x and not x["trap"] and not x["hidden"] for x in res["after_start"].values())
+    res["fight"] = fight(a, b, cls, seconds=90)
+    checks["attacks_hit_b"] = res["fight"]["b_fights"]["b"]["hits"] > 0
+    checks["attacks_hit_a"] = res["fight"]["a_fights"]["a"]["hits"] > 0
+    # below half its health: its second phase drains the arena and brings poison
+    a.exec(f"kd ehp {cls} 0.45")
+    time.sleep(2)
+    res["fight_phase2"] = fight(a, b, cls, seconds=60)
+    res["calls_sent"], res["calls_run"] = calls_follow(log_from, ("DrainWater", "RefillWater", "RemovePoison",
+                                                                   "KillPoisonCircles", "DoHornBreak"))
+    checks["arena_changes_follow"] = sorted(res["calls_sent"]) == sorted(res["calls_run"])
+    res["pools"] = both(lambda g: len(actors(g, "WhaleKingPoisonCircle")), a, b)
+    suspended_boss_end(a, b, cls, res, checks, "WhaleKingRewardCount")
+    res["saves"] = both(lambda g: named(g, "WhaleKingIsDead"), a, b)
+    checks["killed_flag_both"] = all(x.get("WhaleKingIsDead") == 1 for x in res["saves"].values())
+    boss_scenario_end(a, b)
+    res["checks"] = checks
+    return all(checks.values()), res
+
+
+def king_of_stone(a, b):
+    """King of Stone (Stone Garden). The CLIENT wakes it and it rises on both copies; its attacks hit each player it
+    fights. The host's player then leaves the arena while the client keeps fighting: the boss must not heal to full or
+    give up (it did, for everyone). It lies defeated on both, each player gets the reward from their own copy and both
+    saves have SZWhaleKingIsDead."""
+    cls, spawner = "Whaleking_SZ_BP", "WhaleKing_SZ_Spawner_2"
+    boss_scenario_start(a, b, (16374, -28000, -13850), (16200, -28000, -13850))
+    if not ensure_boss(a, b, cls, spawner):
+        return None, {"why": "the King of Stone is not on both copies"}
+    res, checks = {}, {}
+    b.exec(f"kd ewake {cls}")
+    time.sleep(12)
+    res["after_start"] = both(lambda g: boss_of(g, cls), a, b)
+    checks["boss_awake_both"] = all(x and not x["trap"] for x in res["after_start"].values())
+    res["fight"] = fight(a, b, cls, seconds=60)
+    checks["attacks_hit_b"] = res["fight"]["b_fights"]["b"]["hits"] > 0
+    checks["attacks_hit_a"] = res["fight"]["a_fights"]["a"]["hits"] > 0
+    a.exec(f"kd ehp {cls} 0.6")
+    time.sleep(2)
+    hp_before = (boss_of(a, cls) or {}).get("hp")
+    a.exec("tp 16374 -20000 -13500 0")   # 87 m out of its arena
+    end = time.time() + 15
+    while time.time() < end:   # the client keeps fighting meanwhile
+        b.exec(f"kd ehit {cls} 1")
+        time.sleep(2.5)
+    res["host_left"] = {"hp_before": hp_before, "hp_after": both(lambda g: (boss_of(g, cls) or {}).get("hp"), a, b)}
+    checks["no_reset_while_client_fights"] = hp_before is not None and \
+        all(h is not None and h <= hp_before + 1 for h in res["host_left"]["hp_after"].values())
+    a.exec("tp 16374 -28000 -13850 0")
+    time.sleep(3)
+    suspended_boss_end(a, b, cls, res, checks, "WhaleKingSGRewardCount")
+    res["saves"] = both(lambda g: named(g, "SZWhaleKingIsDead"), a, b)
+    checks["killed_flag_both"] = all(x.get("SZWhaleKingIsDead") == 1 for x in res["saves"].values())
+    boss_scenario_end(a, b)
+    res["checks"] = checks
+    return all(checks.values()), res
+
+
+def royal_fishmaner(a, b):
+    """Royal Fishmaner (Aqua Ruins depths). It wakes for the CLIENT; its swings and its area attack hit each player it
+    fights (its area attack's hitbox only reached the machine that runs it before); it dies on both and both saves
+    have AquaRuinsFishmanMiniboss."""
+    cls, spawner = "Fishmaner_Boss", "FishManerSpawner17"
+    boss_scenario_start(a, b, (-6589, -10200, -5000), (-6589, -10350, -5000))
+    if not ensure_boss(a, b, cls, spawner):
+        return None, {"why": "the Royal Fishmaner is not on both copies"}
+    res, checks = {}, {}
+    b.exec(f"kd ewake {cls}")
+    time.sleep(4)
+    res["fight"] = fight(a, b, cls, seconds=70)
+    checks["attacks_hit_b"] = res["fight"]["b_fights"]["b"]["hits"] > 0
+    checks["attacks_hit_a"] = res["fight"]["a_fights"]["a"]["hits"] > 0
+    res["kill_hits"] = kill(a, cls)
+    time.sleep(6)
+    res["after_kill"] = both(lambda g: boss_of(g, cls), a, b)
+    checks["dead_both"] = all(x is None or x["dead"] for x in res["after_kill"].values())
+    res["saves"] = both(lambda g: named(g, "AquaRuinsFishmanMiniboss"), a, b)
+    checks["killed_flag_both"] = all(x.get("AquaRuinsFishmanMiniboss") == 1 for x in res["saves"].values())
+    boss_scenario_end(a, b)
+    res["checks"] = checks
+    return all(checks.values()), res
+
+
+def evil_fishwife(a, b):
+    """Evil Fishwife (Jigeki temple). The CLIENT steps into her arena: the temple door closes and her guardians rise on
+    both copies; her attacks hit each player she fights; every guardian resurrection on the host's copy runs on the
+    client's; she lies defeated on both, each player gets the reward from their own copy, both saves have
+    EvilFishWifeDefeated and the door opens on both."""
+    cls, spawner = "FishWifeEvil", "FishWifeEvil_Spawner"
+    boss_scenario_start(a, b, (-18881, -16900, -13250), (-18881, -17050, -13250))
+    if not ensure_boss(a, b, cls, spawner):
+        return None, {"why": "the Evil Fishwife is not on both copies"}
+    res, checks = {}, {}
+    log_from = {n: len(kd_log_all(n)) for n in ("A", "B")}
+    door = getvar(a, spawner, "JigekiDoor") or getvar(a, spawner, "Door")
+    res["door"] = door
+    b.exec(f"activate {spawner}")
+    time.sleep(6)
+    res["door_in_fight"] = both(lambda g: door_open(g, door), a, b)
+    checks["arena_locked_both"] = res["door_in_fight"] == {"a": False, "b": False}
+    res["guardians"] = both(lambda g: len([x for x in actors(g, "Guardian_Fishman") if not x["hidden"]]), a, b)
+    checks["guardians_both"] = res["guardians"]["a"] > 0 and res["guardians"]["a"] == res["guardians"]["b"]
+    res["fight"] = fight(a, b, cls, seconds=60)
+    checks["attacks_hit_b"] = res["fight"]["b_fights"]["b"]["hits"] > 0
+    checks["attacks_hit_a"] = res["fight"]["a_fights"]["a"]["hits"] > 0
+    res["calls_sent"], res["calls_run"] = calls_follow(log_from, ("Resurrect", "FinalKill"))
+    checks["guardian_calls_follow"] = sorted(res["calls_sent"]) == sorted(res["calls_run"])
+    suspended_boss_end(a, b, cls, res, checks, "FishwifeEvilRewardCount", boss_end="DoneSpeaking")
+    res["saves"] = both(lambda g: named(g, "EvilFishWifeDefeated"), a, b)
+    checks["defeated_flag_both"] = all(x.get("EvilFishWifeDefeated") == 1 for x in res["saves"].values())
+    res["door_after"] = both(lambda g: door_open(g, door), a, b)
+    checks["arena_open_both"] = res["door_after"] == {"a": True, "b": True}
+    boss_scenario_end(a, b)
+    res["checks"] = checks
+    return all(checks.values()), res
+
+
+def white_tree_golem(a, b):
+    """White Tree Golem (golden room under the Ruins). The CLIENT uses the big nut: the golem appears and wakes on both
+    copies; its attacks hit each player it fights; it dies on both, both saves have WhiteTreeGolemDead and the big nut
+    it leaves is there for both."""
+    cls, nut = "Golem_WhiteTree", "BigNut_SM_2"
+    boss_scenario_start(a, b, (12218, -700, -1450), (12218, -850, -1450))
+    res, checks = {}, {}
+    b.exec(f"interact {nut}")
+    time.sleep(12)
+    res["after_start"] = both(lambda g: [x["name"] for x in actors(g, cls)], a, b)
+    checks["golem_on_both"] = all(res["after_start"].values())
+    if not checks["golem_on_both"]:
+        return False, {**res, "checks": checks}
+    res["fight"] = fight(a, b, cls, seconds=60)
+    checks["attacks_hit_b"] = res["fight"]["b_fights"]["b"]["hits"] > 0
+    checks["attacks_hit_a"] = res["fight"]["a_fights"]["a"]["hits"] > 0
+    res["kill_hits"] = kill(a, cls)
+    time.sleep(8)
+    res["after_kill"] = both(lambda g: boss_of(g, cls), a, b)
+    checks["dead_both"] = all(x is None or x["dead"] for x in res["after_kill"].values())
+    res["saves"] = both(lambda g: named(g, "WhiteTreeGolemDead"), a, b)
+    checks["killed_flag_both"] = all(x.get("WhiteTreeGolemDead") == 1 for x in res["saves"].values())
+    res["nut_pickup"] = both(lambda g: [p["class"] for p in visible_pickups(g).values() if "Nut" in p["class"]], a, b)
+    checks["nut_for_both"] = all(res["nut_pickup"].values())
+    boss_scenario_end(a, b)
+    res["checks"] = checks
+    return all(checks.values()), res
+
+
 SCENARIOS = {"movement": movement, "loot_and_world": loot_and_world, "client_loot": client_loot,
              "host_world_objects": host_world_objects, "client_world_objects": client_world_objects,
              "host_gate": host_gate, "client_gate": client_gate,
@@ -1336,6 +1529,8 @@ SCENARIOS = {"movement": movement, "loot_and_world": loot_and_world, "client_loo
              "enemy_hp_agree": enemy_hp_agree, "death": death, "host_leaves": host_leaves,
              "grave_guardian": grave_guardian, "executioner": executioner, "necronomicon": necronomicon,
              "lost_librarian": lost_librarian,
+             "whaleking": whaleking, "king_of_stone": king_of_stone, "royal_fishmaner": royal_fishmaner,
+             "evil_fishwife": evil_fishwife, "white_tree_golem": white_tree_golem,
              "lag": lag}
 
 # Each group runs on a freshly booted pair, so one group's actions never leak into the next one's checks.
@@ -1483,7 +1678,8 @@ SUITES = {
 }
 # Lane B: each boss changes the world for good (a defeated boss stays defeated): one fresh pair per area group
 SUITES["b1"] = [["grave_guardian"], ["executioner", "lost_librarian"], ["necronomicon"]]
-SUITES["laneb"] = SUITES["b1"]
+SUITES["b2"] = [["whaleking"], ["king_of_stone"], ["royal_fishmaner"], ["evil_fishwife"], ["white_tree_golem"]]
+SUITES["laneb"] = SUITES["b1"] + SUITES["b2"]
 SUITES["all"] = SUITES["lane1"] + SUITES["lane2"] + SUITES["laneA"] + SUITES["laneb"]
 
 
