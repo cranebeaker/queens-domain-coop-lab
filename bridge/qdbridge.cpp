@@ -10,6 +10,7 @@
 #include "SDK/TitleScreenUI_classes.hpp"
 #include "SDK/TitleScreenUI_parameters.hpp"
 #include "SDK/FS_PlayerChar_classes.hpp"
+#include "SDK/FS_PlayerChar_parameters.hpp"
 #include "SDK/FS_SaveSlot_classes.hpp"
 #include "SDK/EnemyBase_classes.hpp"
 #include "SDK/ItemPickup_Base_classes.hpp"
@@ -30,6 +31,7 @@
 #include <cmath>
 #include <cstdio>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -146,6 +148,20 @@ std::wstring KdDevCmdPath() {
 
 // ------------------------------------------------------------------ state
 
+// Live widgets whose class name contains `match` (Blueprint UI that loads after the title screen is not in the SDK).
+std::vector<SDK::UUserWidget*> WidgetsMatching(const std::string& match) {
+    std::vector<SDK::UUserWidget*> out;
+    auto& objs = SDK::UObject::GObjects;
+    SDK::UClass* cls = SDK::UUserWidget::StaticClass();
+    for (int i = 0; i < objs->Num(); ++i) {
+        SDK::UObject* o = objs->GetByIndex(i);
+        if (!o || o->IsDefaultObject() || !o->IsA(cls)) continue;
+        if (!match.empty() && ObjName(o->Class).find(match) == std::string::npos) continue;
+        out.push_back(static_cast<SDK::UUserWidget*>(o));
+    }
+    return out;
+}
+
 Value PlayerState() {
     Value v = Value::object();
     SDK::AFS_PlayerChar_C* p = Player();
@@ -154,6 +170,7 @@ Value PlayerState() {
     v.set("class", ObjName(p->Class));
     v.set("pos", Vec(p->K2_GetActorLocation()));
     v.set("health", p->Health);
+    v.set("dead", static_cast<bool>(p->IsDead));
     return v;
 }
 
@@ -340,6 +357,12 @@ Value PuppetsState() {
         v.set("name", ObjName(a));
         v.set("pos", Vec(a->K2_GetActorLocation()));
         v.set("hidden", static_cast<bool>(a->bHidden));
+        // the mod drives puppets in single-node mode: the playing asset tells idle / walk / attack / death apart
+        SDK::UAnimInstance* ai = sk->AnimScriptInstance;
+        std::string anim;
+        if (ai && ai->IsA(SDK::UAnimSingleNodeInstance::StaticClass()))
+            anim = ObjName(static_cast<SDK::UAnimSingleNodeInstance*>(ai)->CurrentAsset);
+        v.set("anim", anim);
         list.push(v);
     }
     return list;
@@ -362,6 +385,138 @@ Value PickupsState(double radiusCm) {
         list.push(v);
     }
     return list;
+}
+
+// ------------------------------------------------------------------ watch (attack recorder)
+// Enemy projectiles and area-attack actors live for a second or less, too short to catch by polling `state` from
+// Python. `exec watch start` records, on the game thread every ~50 ms: every actor near the local player whose class
+// (or a parent class) name contains one of the watch words, with its closest approach, plus the local player's health
+// (with the mod's `kd god` on, health sits near 1e6 and every hit leaves a dent, so drops count hits). The classes are
+// matched by name at runtime because most enemy Blueprints load after the title screen, where the SDK was dumped.
+
+struct WatchRec {
+    std::string cls, owner;
+    ULONGLONG firstMs = 0, lastMs = 0;
+    double minDist = 1e30;
+    int samples = 0;
+};
+
+struct Watch {
+    bool on = false;
+    ULONGLONG t0 = 0, lastSample = 0;
+    double radiusCm = 6000;
+    std::vector<std::string> words{"Projectile", "Arrow", "Splash", "Vortex", "Whirl", "Wave", "AOE", "Aoe", "Spit",
+                                   "Puddle", "Fireball", "Creep", "Explosion", "Shockwave"};
+    std::map<std::string, WatchRec> seen;          // by actor name (names carry a unique number)
+    std::map<SDK::UClass*, bool> classMatch;       // cache: does this class match a watch word
+    double hpStart = 0, hpMin = 0, hpLast = 0, damage = 0;
+    int drops = 0;
+    bool hpValid = false;
+    struct Drop { ULONGLONG ms; double amount, nearestDist; std::string nearest; };
+    std::vector<Drop> dropLog;                     // each hit: when, how much, closest watched actor at that moment
+    double prevNearestDist = 1e30;                 // previous sample's closest (a projectile is gone the frame it hits)
+    std::string prevNearest;
+} g_watch;
+
+bool WatchClassMatches(SDK::UClass* cls) {
+    auto it = g_watch.classMatch.find(cls);
+    if (it != g_watch.classMatch.end()) return it->second;
+    bool m = false;
+    for (SDK::UStruct* s = cls; s && !m; s = s->SuperStruct) {
+        const std::string n = s->GetName();
+        for (const auto& w : g_watch.words) if (n.find(w) != std::string::npos) { m = true; break; }
+    }
+    g_watch.classMatch[cls] = m;
+    return m;
+}
+
+void WatchTick() {
+    if (!g_watch.on) return;
+    const ULONGLONG now = GetTickCount64();
+    if (now - g_watch.lastSample < 50) return;
+    g_watch.lastSample = now;
+    SDK::AFS_PlayerChar_C* me = Player();
+    if (!me) return;
+    const SDK::FVector at = me->K2_GetActorLocation();
+    SDK::UWorld* w = World();
+    auto& objs = SDK::UObject::GObjects;
+    SDK::UClass* actorCls = SDK::AActor::StaticClass();
+    double nearestDist = 1e30;
+    std::string nearest;
+    for (int i = 0; i < objs->Num(); ++i) {
+        SDK::UObject* o = objs->GetByIndex(i);
+        if (!o || o->IsDefaultObject() || !o->Class || !o->IsA(actorCls) || !WatchClassMatches(o->Class)) continue;
+        auto* a = static_cast<SDK::AActor*>(o);
+        if (a->bActorIsBeingDestroyed || !a->RootComponent) continue;
+        SDK::UObject* outer = a->Outer;
+        if (!outer || !outer->IsA(SDK::ULevel::StaticClass()) || static_cast<SDK::ULevel*>(outer)->OwningWorld != w) continue;
+        const double d = Dist(a->K2_GetActorLocation(), at);
+        if (d > g_watch.radiusCm) continue;
+        WatchRec& r = g_watch.seen[a->GetName()];
+        if (r.samples == 0) {
+            r.cls = ObjName(a->Class);
+            r.owner = ObjName(a->Instigator ? static_cast<SDK::UObject*>(a->Instigator) : static_cast<SDK::UObject*>(a->Owner));
+            r.firstMs = now - g_watch.t0;
+        }
+        r.lastMs = now - g_watch.t0;
+        r.minDist = (std::min)(r.minDist, d);
+        ++r.samples;
+        if (d < nearestDist) { nearestDist = d; nearest = a->GetName(); }
+    }
+    const double hp = me->Health;
+    if (!g_watch.hpValid) {
+        g_watch.hpStart = g_watch.hpMin = g_watch.hpLast = hp;
+        g_watch.hpValid = true;
+    } else {
+        if (hp < g_watch.hpLast - 0.01) {
+            ++g_watch.drops;
+            g_watch.damage += g_watch.hpLast - hp;
+            const bool usePrev = g_watch.prevNearestDist < nearestDist;
+            g_watch.dropLog.push_back({now - g_watch.t0, g_watch.hpLast - hp, usePrev ? g_watch.prevNearestDist : nearestDist,
+                                       usePrev ? g_watch.prevNearest : nearest});
+        }
+        g_watch.hpMin = (std::min)(g_watch.hpMin, hp);
+        g_watch.hpLast = hp;
+    }
+    g_watch.prevNearestDist = nearestDist;
+    g_watch.prevNearest = nearest;
+}
+
+Value WatchState() {
+    Value v = Value::object();
+    v.set("on", g_watch.on);
+    v.set("ms", g_watch.t0 ? static_cast<double>(GetTickCount64() - g_watch.t0) : 0.0);
+    Value list = Value::array();
+    for (const auto& [name, r] : g_watch.seen) {
+        Value e = Value::object();
+        e.set("name", name);
+        e.set("class", r.cls);
+        e.set("owner", r.owner);
+        e.set("firstMs", static_cast<double>(r.firstMs));
+        e.set("lastMs", static_cast<double>(r.lastMs));
+        e.set("minDist", std::round(r.minDist));
+        e.set("samples", r.samples);
+        list.push(e);
+    }
+    v.set("actors", list);
+    Value h = Value::object();
+    h.set("start", g_watch.hpStart);
+    h.set("min", g_watch.hpMin);
+    h.set("last", g_watch.hpLast);
+    h.set("drops", g_watch.drops);
+    h.set("damage", g_watch.damage);
+    Value hits = Value::array();
+    for (const auto& d : g_watch.dropLog) {
+        Value e = Value::object();
+        e.set("ms", static_cast<double>(d.ms));
+        e.set("amount", d.amount);
+        e.set("nearest", d.nearest.empty() ? Value() : Value(d.nearest));
+        e.set("nearestDist", d.nearest.empty() ? Value() : Value(std::round(d.nearestDist)));
+        hits.push(e);
+    }
+    h.set("hits", hits);
+    v.set("health", h);
+    return v;
 }
 
 // ------------------------------------------------------------------ adapter
@@ -541,6 +696,50 @@ public:
             if (!p || !CallNoParams(p, fn)) throw cb::Error(cb::errc::kInvalidParams, "cannot call " + fn);
             return {true, "called " + fn};
         }
+        if (cmd == "widgets") {   // widgets [class match]: live widget classes; with a match, also their own functions
+            std::string match; in >> match;
+            std::map<std::string, int> seen;
+            std::string fns;
+            for (auto* w : WidgetsMatching(match)) {
+                ++seen[ObjName(w->Class)];
+                if (!match.empty() && fns.empty())
+                    for (SDK::UField* f = w->Class->Children; f; f = f->Next)
+                        if (f->IsA(SDK::UFunction::StaticClass())) fns += ObjName(f) + " ";
+            }
+            std::string txt;
+            for (auto& [k, n] : seen) txt += k + "x" + std::to_string(n) + " ";
+            return {true, txt + (fns.empty() ? "" : "| functions: " + fns)};
+        }
+        if (cmd == "uicall") {   // uicall <widget class match> <function>: call a no-parameter function on it
+            std::string match, fn; in >> match >> fn;
+            auto ws = WidgetsMatching(match);
+            for (auto* w : ws)
+                if (CallNoParams(w, fn)) return {true, "called " + fn + " on " + ObjName(w)};
+            throw cb::Error(cb::errc::kInvalidParams, "no widget " + match + " with " + fn);
+        }
+        if (cmd == "die") {   // die: the local player dies the normal way (the player Blueprint's Kill)
+            auto* p = Player();
+            if (!p) throw cb::Error(cb::errc::kInvalidParams, "no player");
+            SDK::Params::FS_PlayerChar_C_Kill k{};
+            Need(CallWith(p, "Kill", k), "Kill");
+            return {true, "killed the local player"};
+        }
+        if (cmd == "watch") {   // watch start [radius cm] [word ...] | watch stop: see WatchTick; read with state "watch"
+            std::string sub; in >> sub;
+            if (sub == "start") {
+                double r = 6000; in >> r;
+                std::vector<std::string> words;
+                for (std::string w; in >> w;) words.push_back(w);
+                g_watch = Watch{};
+                if (!words.empty()) g_watch.words = words;   // default: the list in Watch
+                g_watch.radiusCm = r > 0 ? r : 6000;
+                g_watch.t0 = GetTickCount64();
+                g_watch.on = true;
+                return {true, "watching"};
+            }
+            if (sub == "stop") { g_watch.on = false; return {true, "stopped"}; }
+            throw cb::Error(cb::errc::kInvalidParams, "watch start [radius] | watch stop");
+        }
         if (cmd == "kd") {   // pass the rest of the line to the co-op mod's own dev command file
             std::string rest; std::getline(in, rest);
             if (!rest.empty() && rest[0] == ' ') rest.erase(0, 1);
@@ -578,6 +777,7 @@ public:
         if (want("savables")) v.set("savables", SavablesState(6000, false));
         if (!sections.empty() && want("savables_all")) v.set("savables_all", SavablesState(0, false));
         if (want("checkpoints")) v.set("checkpoints", CheckpointsState());
+        if (want("watch")) v.set("watch", WatchState());
         return v;
     }
 };
@@ -604,6 +804,7 @@ void HookedProcessEvent(SDK::UObject* obj, SDK::UFunction* fn, void* parms) {
             g_lastPump = now;
             t_inPump = true;
             g_server.Pump();
+            WatchTick();
             t_inPump = false;
         }
     }

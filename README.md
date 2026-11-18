@@ -52,6 +52,11 @@ py -3 -I runner/scenarios.py host_gate       # ... and run single scenarios agai
 py -3 -I runner/rig.py stop                  # kills the lab copies (never the real game)
 ```
 
+Bad network: `rig.py pair --lag` puts the [Co-op Anything](https://github.com/cranebeaker/coop-anything) hub's
+`tools/chaos` relay between B and A's UDP port, with 25 +/- 25 ms each way and 2 % loss (50 to 150 ms round trip). Clone
+the hub next to this repo (`..\coop-anything`) or set `QD_HUB`. `scenarios.py lag` reruns scenarios 7 to 12 (and
+movement) that way, each from a fresh pair; it is not part of the default run. `rig.py stop` also stops the relay.
+
 Poke a copy by hand:
 
 ```
@@ -62,12 +67,13 @@ py -3 -I runner/rig.py exec A "kd enemy"            # any Knights' Domain dev co
 
 ## Bridge commands
 
-`state` sections: `player` (local pos, health), `save` (inventory, savableActorStates, namedSaveData, itemDrops,
+`state` sections: `player` (local pos, health, dead), `save` (inventory, savableActorStates, namedSaveData, itemDrops,
 unlockedTeleporters, killedEnemyCounts, xp, level, lastCheckpoint), `enemies` (within 60 m: class, pos, hp, dead,
-aiDisabled), `players` (player characters in the world), `puppets` (the mod's knight bodies of remote players),
+aiDisabled), `players` (player characters in the world), `puppets` (the mod's knight bodies of remote players, with the animation each one plays: idle, walk, attack, `Knight_Undead_Death`),
 `pickups` (item pickups within 60 m), `savables` (saved world objects within 60 m: chests, levers, gates, secret
 walls, pickups, quest state; with their save GUIDs and live state), `savables_all` (the same for everything loaded),
-`checkpoints` (loaded checkpoints). Save also has `savePoint` and `savePointsVisited`.
+`checkpoints` (loaded checkpoints), `watch` (what `exec watch` recorded, see below). Save also has
+`savePoint` and `savePointsVisited`.
 
 Actor names repeat across sublevels; every command that takes a name uses the loaded actor of that name nearest to
 the player.
@@ -78,7 +84,12 @@ event: pickup, chest, door, lever, secret wall, checkpoint), `activate <actor>` 
 switches), `callon <actor> <function>` (any function with no parameters, e.g. `InsertKey`, `Break`), `breakhp <barricade>`
 (HP to 0, then the game's own `TookHit`), `fns <actor>` (list its Blueprint functions), `clearpath <actor> [cm]`
 (turn off collision of nearby enemies, test setup only), `passthrough <actor> [cm] [up]` (can the player walk through
-it, both ways, with collision), `sweep x y z`, `call <function>` on the player, `kd <line>` (the mod's dev command file).
+it, both ways, with collision), `sweep x y z`, `call <function>` on the player, `kd <line>` (the mod's dev command file), `die` (the local player dies through the player Blueprint's own `Kill`), `widgets [class match]` (live UI widget classes; with a match, also that widget's own functions), `uicall <widget class match> <function>` (call a function on a live widget, e.g. the Game Over screen's Continue button), `kd <line>` (the mod's dev command file),
+
+`watch start [radius cm] [word ...]` / `watch stop`: on the game thread every 50 ms, record each actor within the radius whose
+class or a parent class name contains one of the words (default: Projectile, Arrow, Splash, Vortex, Whirl, Wave, AOE,
+Spit, Puddle, Fireball, Creep, Explosion, Shockwave) with its class, instigator and closest approach, and every drop in the local player's health with the closest such actor at that moment. With the
+mod's `kd god` on, health sits near 1,000,000 and is only refilled below 100,000, so every hit leaves a dent.
 
 `eval`: `world`, `title`, `loading`, `inworld`, `health`.
 
@@ -101,6 +112,13 @@ the co-op behaviour is right, so FAIL means the thing is not shared.
 | story_flags | FAIL | after A's actions, 8 story counters are set on A and missing on B (`TotalChestsOpened`, `TotalSecretDoorsOpened`, `BrokeBarricade`, `TotalBrokenPermaBreakables`, `CheckpointUnlockCount`, `TotalAchievementWeapons`, `WindGemsAcquired`, `FullEnergyCellsCount`); A's save has 14 world entries, B's 6, 8 differ |
 | rejoin | FAIL | B left and joined again after A opened `Chest10_2`: the rejoined B has its own new world with the chest closed. The old teammate model was removed and a new one spawned correctly (A sees exactly 1) |
 | client_progress_persists | PASS | B picked up `Herb_Item_BP3_5`, rested, quit and loaded its slot alone: HealingHerb 2, checkpoint `GR_Camp_Save` and the taken pickup all kept |
+| ranged_attacks | FAIL (gap) | Two `Mossy_Archer_BP_C` shoot at A (10 m away) for 30 s, B in god mode stands on the line halfway (0 cm off it). Both copies play `Boner_Bow_Attack` on the archers (owner P1), but the arrows (`Mossy_Arrow_Projectile_C`) exist only on A: A saw 12 / 11 arrows and took 11 / 11 hits; B saw 0 arrows and took 0 hits |
+| area_attacks | FAIL (gap) | The Ruins dragon boss (`Dragon_Green_BP_C`) fights A for 75 s, B in god mode kept a median 1.5 m from A. Both copies play the same boss montages (fire breath, air fireballs), but fire puddles (`Dragon_FirePuddle_C`), fireballs (`Dragon_Fireball_C`) and flame-breath projectiles exist only on A: A saw 59 + 0 + 48 / 16 + 9 + 16 of them and took 16 + 0 + 91 / 22 + 17 + 32 hits from them; B saw none and took 0 hits |
+| drops_and_xp | FAIL (gap) | A kills 10 small enemies near (3000, -2000) with `kd ehit` (4000 damage), B 1.5 m behind A. XP and `killedEnemyCounts` agree on both copies in most runs (432 / 432), but B missed one of A's kills in 3 of 12 runs (70 kills in all; run 1 here: 432 vs 422 XP). Loot is rolled on each copy: what drops differs (run 2: A got a coin, two herbs and a poison cure, B one coin), each player picks up their own copy, and nothing of it exists on the other copy |
+| enemy_hp_agree | FAIL (gap, intermittent) | A and B take turns hitting a `Mossy_Fighter_BP_C` (67.2 HP) for 3 until it dies. HP agrees on both copies after every hit (worst gap 0.0) and it dies on both at the same hit. But some of A's hits do nothing: run 1 took 23 hits with none lost, run 2 took 27, and A's hits 3, 5, 7 and 9 changed nothing on either copy. Ownership moves to the last hitter, so it flips between the players on every hit. Each lost hit was relayed to B about 3 ms before ownership flipped back to A |
+| death | PASS | A dies (`die`) 51 m from where a new game starts, with no checkpoint rested at. B sees A's knight play `Knight_Undead_Death` 1.1 s later. A gets the Game Over screen; after Continue, A's world reloads (B's doesn't) and A is back in 9.6 s at the new-game start. The session survives: each copy shows the other player again within 0.2 s, and movement syncs both ways (0 cm error). Enemies A killed before dying stay dead on both copies. One earlier trial run (1 of 4) had both puppets missing after the respawn, and movement didn't sync; it didn't happen again in the next three |
+| host_leaves | PASS | Mid-fight near (3000, -2000) (the host owns 99 enemies), A's game is killed. B removes A's knight after 4.0 s and notices after 10.7 / 10.8 s (`disconnected (host lost)`). It shows "The host left" and "Co-op failed: host lost", ends the session cleanly, takes over the ~59 enemies it was following and scales their HP back for 1 player. B stays in its world: the enemies keep fighting (42 / 44 hits on B in the next minute, 4 of 5 / 4 of 6 moved), and B's own hit still kills |
+| lag | PASS / FAIL (pass 2: `death` broke) | Scenarios 7 to 12 and movement again, B joining through the hub's chaos relay (25 +/- 25 ms each way, 2 % loss; the relay dropped 2 to 2.5 % each way, B's mod logged a worst ping of 220 to 1000 ms). Two passes: movement 0 / 0 cm; `ranged_attacks` and `area_attacks` the same gaps (B sees 0 projectiles / area actors); `host_leaves` PASS / PASS (B notices after 10.7 s). Worse with lag: `drops_and_xp` B missed 4 kills in pass 1 (318 vs 432 XP) and 1 in pass 2; `enemy_hp_agree` FAIL / PASS (pass 1: HP 3.0 apart once, 4 host hits lost). `death` PASS / FAIL: in pass 2 the host's mod caught an access violation in its `playersync` ticker during the reload after death and removed the ticker, so neither copy showed the other player for the rest of the session. That is most likely also the unconfirmed `death` failure on the plain link |
 
 World objects, each used by one player (state = the object's own save data, live and in the save):
 
@@ -129,6 +147,12 @@ Quest state is covered by `story_flags`; no quest manager changed in these runs.
   name belongs (`GetStaticName(L"TitleScreenUI_C", ...)`). Calling one is a fatal `Failed to find function`. The
   bridge calls BP functions by name with the SDK parameter structs instead. Engine-class wrappers are fine.
 - If `CMAKE_TOOLCHAIN_FILE` is set in your environment (an Android NDK install sets it), CMake configures fail; `setup.py` drops it for its own builds.
+- `rig.py stop` waits for the copies to exit. A copy relaunched while the old process still holds the mod's log
+  cannot rotate it and runs with no log at all (the mod still works).
+- `kd ehit <enemy> <damage>` on an enemy another player owns is relayed to that owner, which rejects anything over
+  5000 damage ("damage request rejected" in its log, nothing in yours). Use 4000 to kill a small enemy.
+- Knights' Domain 1.0.3 logs `unknown game build: Blueprint hooks are incomplete, enemy sync will miss events` on
+  the current Steam build (26663759). Keep that in mind for intermittent enemy results.
 - The bridge pumps inside `ProcessEvent` of a few native vtables (UUserWidget, AFS_PlayerCharacter,
   APlayerController), the same context the title-screen buttons run in.
 - A new game in a used save slot keeps parts of the old world, so `rig.py` deletes the copy's own `SaveGames` before
@@ -138,4 +162,4 @@ Quest state is covered by `story_flags`; no quest manager changed in these runs.
 
 ## Next scenarios
 
-See [TASKS.md](TASKS.md). Lane 1 (world, loot, saves) is measured above; Lane 2 (combat, death, network) is in progress.
+See [TASKS.md](TASKS.md). Lane 1 (world, loot, saves) is measured above; Lane 2 (combat, death, network) is in progress: `ranged_attacks`, `area_attacks`, `drops_and_xp`, `enemy_hp_agree`, `death`, `host_leaves` and `lag` are measured above: Lane 2 is done.

@@ -26,13 +26,13 @@ All measured: two clean runs of `py -3 -I runner/scenarios.py --suite lane1`, id
 
 | # | Scenario | What to measure |
 |---|---|---|
-| 7 | `ranged_attacks` | a ranged enemy targets A, B stands in the line of fire with `kd god`: is B hit, does B see the projectile (their open issue 2) |
-| 8 | `area_attacks` | the same for area attacks (water vortex, boss splash) |
-| 9 | `drops_and_xp` | A kills an enemy (`kd ehit`): `itemDrops`, `xp`, `killedEnemyCounts` on both, and who can pick up the drop |
-| 10 | `enemy_hp_agree` | hit an enemy from both sides: HP and death agree on both copies |
-| 11 | `death` | A dies: what B sees, does the session survive A's reload, where does A come back |
-| 12 | `host_leaves` | stop A mid-fight: B's log and state, does B keep playing |
-| 13 | `lag` | rerun 7 to 12 through the Co-op Anything hub's `tools/chaos` relay (50 to 150 ms, 2% loss) |
+| 7 | `ranged_attacks` (done, gap) | archers shooting at A: B sees the bow animation but no arrow, and is never hit standing in the line of fire (their open issue 2) |
+| 8 | `area_attacks` (done, gap) | Ruins dragon boss: fire puddles, fireballs and flame breath exist and hit only on the targeted player. Water vortex and whale splash are in later levels, not measured yet |
+| 9 | `drops_and_xp` (done, gap) | A kills an enemy (`kd ehit`): XP and kill counts agree (B sometimes misses a kill), but each copy rolls its own loot and each player picks up their own |
+| 10 | `enemy_hp_agree` (done, gap) | hit an enemy from both sides: HP and death agree on both copies, but some host hits relayed to the client owner are lost as ownership flips |
+| 11 | `death` (done, pass) | A dies: B sees the death animation, the session survives A's reload, A comes back at its save point (new-game start without a checkpoint) |
+| 12 | `host_leaves` (done, pass) | stop A mid-fight: B notices in ~11 s, ends the session cleanly, takes the enemies over and keeps playing |
+| 13 | `lag` (done) | rerun 7 to 12 through the hub's chaos relay: same gaps, more missed kills and lost hits, and the host's player sync can die in the reload after death |
 
 ## Rules
 

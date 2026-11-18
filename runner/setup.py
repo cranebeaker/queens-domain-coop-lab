@@ -119,9 +119,27 @@ def step_sdk():
     print("SDK at", target)
 
 
+def patch_sdk_offsets():
+    """Knights' Domain 1.0.6 looks the engine addresses up at run time and writes them into the SDK's Offsets table,
+    so the table must be variables (see "Building" in its source README). Harmless for older sources and the bridge."""
+    basic = os.path.join(SDK_DIR, "CppSDK", "SDK", "Basic.hpp")
+    s = open(basic, encoding="utf-8").read()
+    for name in ("GObjects", "AppendString", "GNames", "GWorld", "ProcessEvent ", "FindFunctionChecked"):
+        s = s.replace("constexpr int32 " + name, "inline int32 " + name)
+    open(basic, "w", encoding="utf-8").write(s)
+    eng = os.path.join(SDK_DIR, "CppSDK", "SDK", "Engine_functions.cpp")
+    s = open(eng, encoding="utf-8").read()
+    s = s.replace("if constexpr (Offsets::GWorld != 0)", "if (Offsets::GWorld != 0)")
+    open(eng, "w", encoding="utf-8").write(s)
+
+
 def step_kd():
     if not os.path.isdir(KD_DIR):
         run(["git", "clone", "-b", "source", KD_URL, KD_DIR])
+    else:
+        run(["git", "pull", "--ff-only"], cwd=KD_DIR)   # the author updates the source branch after releases
+    patch_sdk_offsets()
+    qdlab.stop()
     sdk = os.path.join(SDK_DIR, "CppSDK").replace("\\", "/")
     build = os.path.join(KD_DIR, "build-dev")
     cmake_build(os.path.join(KD_DIR, "src"), build, "-DQD_DEV_BUILD=ON", f"-DQD_SDK={sdk}")
