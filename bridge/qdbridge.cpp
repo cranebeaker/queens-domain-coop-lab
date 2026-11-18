@@ -156,7 +156,8 @@ std::vector<SDK::UUserWidget*> WidgetsMatching(const std::string& match) {
     for (int i = 0; i < objs->Num(); ++i) {
         SDK::UObject* o = objs->GetByIndex(i);
         if (!o || o->IsDefaultObject() || !o->IsA(cls)) continue;
-        if (!match.empty() && ObjName(o->Class).find(match) == std::string::npos) continue;
+        // class name, or the object's own name (runtime widgets: "<Class>_<number>")
+        if (!match.empty() && ObjName(o->Class).find(match) == std::string::npos && ObjName(o).rfind(match, 0) != 0) continue;
         out.push_back(static_cast<SDK::UUserWidget*>(o));
     }
     return out;
@@ -743,6 +744,13 @@ public:
             // both directions: a wall right behind the start point on one side must not fake a block
             const std::string fwd = tryPass(from, to), back = tryPass(to, from);
             return {true, "{\"forward\":" + fwd + ",\"backward\":" + back + "}"};
+        }
+        if (cmd == "console") {   // console <command line>: run an engine console command (e.g. HighResShot 1)
+            std::string rest; std::getline(in, rest);
+            if (!rest.empty() && rest[0] == ' ') rest.erase(0, 1);
+            SDK::UKismetSystemLibrary::ExecuteConsoleCommand(World(), SDK::FString(std::wstring(rest.begin(), rest.end()).c_str()),
+                                                            SDK::UGameplayStatics::GetPlayerController(World(), 0));
+            return {true, "ran " + rest};
         }
         if (cmd == "streamlevel") {   // streamlevel <sublevel name>: load and show it (as walking into it would)
             std::string lvl; in >> lvl;
