@@ -39,14 +39,16 @@ Test windows open on a second monitor placed to the right of a 1920-wide main sc
 | `third_party/coopbridge` | Bridge server header and Python client from the [Co-op Anything](https://github.com/cranebeaker/coop-anything) hub (MIT). |
 | `tools/Dumper-7` | Not in git: cloned by setup at a pinned commit and patched to build with `/std:c++latest` and to write into `sdk/`. |
 
-The mod's dev build lives in `..\knights-domain\build-dev\Release` (its `source` branch, 1.0.3), installed into both
-copies as `xinput1_3.dll` plus `KnightsDomain\KnightsDomain.dll`. The released mod is 1.0.6; its newer source is not
-public, so results here are for 1.0.3 until it is.
+The mod's dev build lives in `..\knights-domain\build-dev\Release` (its `source` branch, 1.0.6 since
+2026-11-18), installed into both copies as `xinput1_3.dll` plus `KnightsDomain\KnightsDomain.dll`.
+`setup.py kd` pulls the newest source, makes the two SDK header edits 1.0.6 needs and reinstalls.
 
 ## Run it
 
 ```
-py -3 -I runner/scenarios.py --suite lane1   # boots fresh pairs itself and runs all of Lane 1, ~12 min
+py -3 -I runner/scenarios.py --suite all     # boots fresh pairs itself and runs both lanes, ~35 min
+py -3 -I runner/scenarios.py --suite lane1   # or one lane (lane1 ~12 min, lane2 ~20 min)
+py -3 -I runner/scenarios.py lag             # Lane 2 again through a lag relay, ~18 min
 py -3 -I runner/rig.py pair                  # or: boot A (host) and B (client) by hand, ~2.5 min
 py -3 -I runner/scenarios.py host_gate       # ... and run single scenarios against the running pair
 py -3 -I runner/rig.py stop                  # kills the lab copies (never the real game)
@@ -93,7 +95,32 @@ mod's `kd god` on, health sits near 1,000,000 and is only refilled below 100,000
 
 `eval`: `world`, `title`, `loading`, `inworld`, `health`.
 
-## Results: Lane 1 (2026-11-18, Steam build 26663759, Knights' Domain 1.0.3 dev build)
+## Status on Knights' Domain 1.0.6 (2026-11-18, Steam build 26663759)
+
+Everything below was measured on 1.0.3 first and then again on 1.0.6 (dev build from the `source` branch):
+`--suite all` twice from empty saves, `lag` twice, and `death` six more times. Both 1.0.6 runs of the suite were
+identical: 5 pass, 13 fail, 0 skip. A scenario passes when the co-op behaviour is right.
+
+| Area | 1.0.3 | 1.0.6 |
+|---|---|---|
+| Players see each other, movement | works | works |
+| World objects, pickups, gates, checkpoints, story flags, rejoin (Lane 1, 10 checks) | not shared | not shared, same numbers |
+| A player's own progress after save and reload | kept | kept |
+| Enemy arrows and boss fire attacks for the player who is not the target | missing | missing (host 12 to 13 arrows and 32 to 93 fire actors, client 0) |
+| Loot from kills | each machine rolls its own | same |
+| XP and kill counts | equal, but the client missed a kill in 3 of 12 runs | equal in all 4 runs (2 plain, 2 with lag) |
+| Enemy HP, every hit counts | HP agrees, some host hits lost when ownership flipped | fixed: 23 hits, none lost, in all 4 runs |
+| Death and respawn | works, but the host's player sync crashed in 2 of 6 runs | works, crashed in 1 of 8 runs (plain link, 7 ms ping) |
+| Host leaves | client notices in about 11 s and keeps playing | same (10.9 s) |
+| 50 to 150 ms lag with 2 % loss | same gaps, more missed kills and lost hits | nothing gets worse than on the plain link (2 passes) |
+
+Draft reports for the author are in `reports/`: world state not shared, projectiles and area attacks, loot per
+machine, and the player sync crash after death. The lost-hits report was dropped: 1.0.6 fixed it.
+
+The tables below give the measured details. Lane 1 numbers are the same on both versions; Lane 2 rows quote the 1.0.3
+runs, with the 1.0.6 outcome in the table above.
+
+## Details: Lane 1 and Lane 2
 
 `--suite lane1`, two complete runs from empty saves, identical results: 2 pass, 10 fail, 0 skip. A scenario passes when
 the co-op behaviour is right, so FAIL means the thing is not shared.
@@ -133,7 +160,7 @@ World objects, each used by one player (state = the object's own save data, live
 | Barricade | `BreakableBarricade2_3` | | final hit | 1 | unset |
 | Lever and gate | `AquaLever_23` | `AquaLever_23` (fresh pair) | interact | lever 1, gate opens | lever unset, gate shut (walk test) |
 
-In short, version 1.0.3 shares players and enemies, but no world object, pickup, checkpoint, story flag or save state,
+In short, the mod shares players and enemies, but no world object, pickup, checkpoint, story flag or save state,
 in either direction, and a rejoining player gets a fresh world. Each player's own progress does save and reload
 correctly. The `WorldFlags` and `InteractRequest` messages in its protocol are defined but never sent.
 
@@ -160,6 +187,7 @@ Quest state is covered by `story_flags`; no quest manager changed in these runs.
 - Doors and gates finish opening a few seconds after the lever, and only while their part of the level is streamed
   in. The gate checks run first in each group, before the long-range teleports of the object checks.
 
-## Next scenarios
+## What is left
 
-See [TASKS.md](TASKS.md). Lane 1 (world, loot, saves) is measured above; Lane 2 (combat, death, network) is in progress: `ranged_attacks`, `area_attacks`, `drops_and_xp`, `enemy_hp_agree`, `death`, `host_leaves` and `lag` are measured above: Lane 2 is done.
+Both lanes in [TASKS.md](TASKS.md) are done. Not measured: later levels (water vortex, whale boss), more than two
+players, and real Steam sessions between two accounts (the rig uses the dev UDP transport).

@@ -11,9 +11,9 @@ copies of the game (host and client) and reads each copy's save state, and found
 player who changed it. The README says the host's world and story progress are shared, so we think this may be a bug
 or a missing piece.
 
-**Version:** Knights' Domain built from the public `source` branch (1.0.3) in the dev flavour (UDP loopback), Queen's
-Domain Steam build 26663759, Windows 11. We could not test 1.0.6 the same way because two copies on one PC need the
-dev UDP transport. If 1.0.6 changed this, please say so and we will retest when its source is up.
+**Version:** Knights' Domain 1.0.6 built from the public `source` branch in the dev flavour (UDP loopback, two copies of
+the game on one PC), Queen's Domain Steam build 26663759, Windows 11. Also measured on 1.0.3 before the 1.0.6 source
+was up; the results are the same on both.
 
 **What we did and saw** (two complete runs from empty saves, identical results):
 
@@ -37,7 +37,7 @@ survive a save and reload after the session.
 **What we expected:** a pickup taken, a chest opened or a lever pulled by anyone would change for everyone, and a
 joining player would see the host's world.
 
-**What we noticed in the 1.0.3 source:** the protocol defines `WorldFlags`, `InteractRequest` and `InteractResult`
+**What we noticed in the source:** the protocol defines `WorldFlags`, `InteractRequest` and `InteractResult`
 (Protocol.h), but nothing sends or handles them yet, so we guess world sync is planned. If it helps, the
 `SavableActorStates` map (GUID to int) plus calling `RestoreFromSave` on the actor looks like a natural thing to sync:
 every chest, door, lever, secret wall, barricade and pickup goes through it.

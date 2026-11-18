@@ -9,9 +9,11 @@ Hi! We measured part ② of this issue with a small test rig: two copies of the 
 the dev UDP transport), plus a bridge that records every projectile near each player and every hit they take. In
 case exact numbers help:
 
-**Version:** Knights' Domain built from the public `source` branch (1.0.3) in the dev flavour, Queen's Domain Steam
-build 26663759, Windows 10. We know 1.0.6 moved attack logic to the host, so this may already look different there;
-we will rerun it when the 1.0.6 source is up.
+**Version:** Knights' Domain 1.0.6 built from the public `source` branch in the dev flavour (UDP loopback, two copies of
+the game on one PC), Queen's Domain Steam build 26663759, Windows 11. Also measured on 1.0.3 before the 1.0.6 source
+was up; the numbers below are from 1.0.3, and 1.0.6 gives the
+same picture (two fresh runs: host 13 / 12 arrows and 12 / 12 hits, client 0 / 0; dragon boss: host 32 / 93 fire
+actors and 35 / 88 hits, client 0 / 0).
 
 **Setup:** Ruins, the two `Mossy_Archer_BP_C` on the ledge near (8400, -3900, 4000). The host stands 10 m from them
 and keeps hitting them (so the host owns them and they target the host). The client stands exactly on the line
@@ -43,7 +45,7 @@ boss montages (`Dragon_Atk_FireBreath_Montage`, `Dragon_Air_Atk_Fireballs_Montag
 
 So puddles and fireball blasts, like projectiles, only exist (and only hurt) on the machine that runs the boss.
 
-**What we noticed in the 1.0.3 source:** followers replay `AttackStart` as the generic attack montage, which the
+**What we noticed in the source:** followers replay `AttackStart` as the generic attack montage, which the
 comment above `kCustomAttacks` in EnemySync.cpp says "shows the swing but deals no damage". The arrows, puddles and
 fireballs are spawned by the attack Blueprints, which only run on the owner. One idea, if useful: a small `ProjectileSpawned` event from the
 owner (class, transform, velocity) that followers spawn locally as a visual, plus the owner checking projectile

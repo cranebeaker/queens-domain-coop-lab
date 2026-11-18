@@ -22,7 +22,7 @@ All measured: two clean runs of `py -3 -I runner/scenarios.py --suite lane1`, id
 | 7 | `rejoin` | gap: a rejoining client gets a fresh world |
 | 8 | `client_progress_persists` | works: the client's own items and checkpoint survive save and reload |
 
-## Lane 2 (friend): combat, death, network
+## Lane 2 (friend): combat, death, network (done)
 
 | # | Scenario | What to measure |
 |---|---|---|
@@ -33,6 +33,9 @@ All measured: two clean runs of `py -3 -I runner/scenarios.py --suite lane1`, id
 | 11 | `death` (done, pass) | A dies: B sees the death animation, the session survives A's reload, A comes back at its save point (new-game start without a checkpoint) |
 | 12 | `host_leaves` (done, pass) | stop A mid-fight: B notices in ~11 s, ends the session cleanly, takes the enemies over and keeps playing |
 | 13 | `lag` (done) | rerun 7 to 12 through the hub's chaos relay: same gaps, more missed kills and lost hits, and the host's player sync can die in the reload after death |
+
+Both lanes were rerun on Knights' Domain 1.0.6 on 2026-11-18 (`--suite all` twice, `lag` twice): same results,
+except that `enemy_hp_agree` now passes (lost hits fixed) and no kill was missed. See the README.
 
 ## Rules
 
