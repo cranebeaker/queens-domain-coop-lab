@@ -1,4 +1,4 @@
-"""Co-op scenarios for Knights' Domain, run against a booted pair (rig.py pair: A host, B client).
+﻿"""Co-op scenarios for Knights' Domain, run against a booted pair (rig.py pair: A host, B client).
 
   py -3 -I runner/scenarios.py [name ...]      default: all, in order
 
@@ -274,7 +274,7 @@ def ranged_attacks(a, b, seconds=30):
     killed = []
     for e in enemies(a):
         if archer not in e["class"] and dist(e["pos"], en["pos"]) < 3000:
-            a.exec(f"kd ehit {e['name']} 99999")
+            a.exec(f"kd ehit {e['name']} 4000")
             killed.append(e["class"])
     time.sleep(2)
     archers = [e["name"] for e in enemies(a) if archer in e["class"] and dist(e["pos"], en["pos"]) < 3000]
@@ -395,10 +395,141 @@ def area_attacks(a, b, seconds=75, near_cm=500):
     return b_sees_area and area_hits(sb) > 0, res
 
 
+def match_enemy(g, en, max_cm=600):
+    """The same enemy on another copy (object names differ per copy): same class, nearest position."""
+    cands = [e for e in g.state(sections=["enemies"])["enemies"] if e["class"] == en["class"]]
+    cands.sort(key=lambda e: dist(e["pos"], en["pos"]))
+    return cands[0] if cands and dist(cands[0]["pos"], en["pos"]) <= max_cm else None
+
+
+def rewards(g):
+    s = g.state(sections=["save"])["save"]
+    return {"xp": s.get("xp"), "kills": dict(s.get("killedEnemyCounts") or {}),
+            "itemDrops": list(s.get("itemDrops") or []), "inventory": dict(s.get("inventory") or {})}
+
+
+def visible_pickups(g):
+    return {p["name"]: p for p in g.state(sections=["pickups"])["pickups"] if not p["hidden"]}
+
+
+def delta(x, y):
+    return {k: (x.get(k), y.get(k)) for k in set(x) | set(y) if x.get(k) != y.get(k)}
+
+
+def drops_and_xp(a, b, spot=(3000, -2000, 500), kills=10):
+    """A kills a few small enemies (`kd ehit`, B stands 1.5 m behind A). Shared rewards: each enemy dies on both
+    copies (both kill counters go up), both get the same XP, and the loot is rolled once: what drops can be picked up
+    by one player, after which it is gone for the other. (The 1.0.3 source: every non-owner "kills its own copy and
+    rolls its own rewards".)"""
+    for g in (a, b):
+        g.exec("kd god 1")
+    a.exec(f"tp {spot[0]} {spot[1]} {spot[2]} 0")
+    time.sleep(3)
+    pa = local_pos(a)
+    targets = [e for e in enemies(a) if e.get("hp") and e["hp"] < 200 and dist(e["pos"], pa) < 4000]
+    targets.sort(key=lambda e: dist(e["pos"], pa))
+    targets = targets[:kills]
+    if not targets:
+        return None, {"why": "no small enemy within 40 m of A"}
+
+    def b_behind_a(en_pos):
+        # B 1.5 m behind A (away from the enemy), so A stays the nearest player and keeps ownership
+        p = local_pos(a)
+        dx, dy = p[0] - en_pos[0], p[1] - en_pos[1]
+        L = math.hypot(dx, dy) or 1.0
+        b.exec(f"tp {p[0] + dx / L * 150} {p[1] + dy / L * 150} {p[2] + 30} 0")
+        time.sleep(1.5)
+
+    b_behind_a(targets[0]["pos"])
+    time.sleep(6)   # B just arrived: let the area's pickups stream in before the baseline
+    before = {"A": rewards(a), "B": rewards(b)}
+    picks_before = {"A": set(visible_pickups(a)), "B": set(visible_pickups(b))}
+    rows = []
+    for en in targets:
+        a.exec(f"kd egoto {en['name']} 300")
+        time.sleep(1.5)
+        b_behind_a(en["pos"])
+        k0 = {"A": rewards(a)["kills"], "B": rewards(b)["kills"]}
+        on_b = match_enemy(b, en, 400)   # B's copy of this enemy, before the hit
+        # 4000: kills any small enemy, and stays under the mod's 5000 cap for a hit relayed to another owner
+        a.exec(f"kd ehit {en['name']} 4000")
+        time.sleep(5)
+        after_a = next((e for e in a.state(sections=["enemies"])["enemies"] if e["name"] == en["name"]), None)
+        k1 = {"A": rewards(a)["kills"], "B": rewards(b)["kills"]}
+        b_after = next((e for e in b.state(sections=["enemies"])["enemies"] if on_b and e["name"] == on_b["name"]),
+                       None)
+        # the enemy died on a copy when that copy's own kill counter went up (object names differ per copy)
+        rows.append({"enemy": en["class"], "dead_on_a": after_a is None or after_a["dead"],
+                     "kill_counted_on_a": sum(k1["A"].values()) > sum(k0["A"].values()),
+                     "kill_counted_on_b": sum(k1["B"].values()) > sum(k0["B"].values()),
+                     "b_copy": None if on_b is None else {
+                         "off_cm": round(dist(on_b["pos"], en["pos"])),
+                         "after": "gone" if b_after is None else {"dead": b_after["dead"], "hp": b_after.get("hp")}}})
+    time.sleep(3)
+    after = {"A": rewards(a), "B": rewards(b)}
+
+    pk_a, pk_b = visible_pickups(a), visible_pickups(b)
+    kill_at = [en["pos"] for en in targets]
+    near_kill = lambda p: any(dist(p["pos"], k) < 800 for k in kill_at)   # drops land at the enemy's feet
+    new = {"A": {n: p for n, p in pk_a.items() if n not in picks_before["A"] and near_kill(p)},
+           "B": {n: p for n, p in pk_b.items() if n not in picks_before["B"] and near_kill(p)}}
+    res = {"spot": spot, "kills": rows,
+           "xp": {n: [before[n]["xp"], after[n]["xp"]] for n in ("A", "B")},
+           "kill_counts": {n: after[n]["kills"] for n in ("A", "B")},
+           "inventory_change_from_kills": {n: delta(before[n]["inventory"], after[n]["inventory"]) for n in ("A", "B")},
+           "itemDrops_added": {n: len(after[n]["itemDrops"]) - len(before[n]["itemDrops"]) for n in ("A", "B")},
+           "pickups_left_on_ground": {n: sorted(p["class"] for p in new[n].values()) for n in ("A", "B")}}
+
+    # who can pick up a drop left on the ground: each copy picks up one of its own, the other copy is checked
+    pick = {}
+    for actor, other, an, on in ((b, a, "B", "A"), (a, b, "A", "B")):
+        mine = sorted(new[an].values(), key=lambda p: p["dist"])
+        if not mine:
+            pick[an] = "no drop left on the ground on this copy"
+            continue
+        p = mine[0]
+        twins = sorted((q for q in visible_pickups(other).values() if q["class"] == p["class"]),
+                       key=lambda q: dist(q["pos"], p["pos"]))
+        twin = twins[0] if twins and dist(twins[0]["pos"], p["pos"]) < 800 else None
+        inv0, inv0_other = rewards(actor)["inventory"], rewards(other)["inventory"]
+        actor.exec(f"tpto {p['name']} 100")
+        time.sleep(1)
+        try:
+            actor.exec(f"interact {p['name']}")
+        except Exception as e:
+            pick[an] = {"pickup": p["class"], "error": repr(e)}
+            continue
+        time.sleep(4)
+        pick[an] = {"pickup": p["class"], f"{on}_has_one_there": twin is not None,
+                    f"still_on_{on}": None if twin is None else twin["name"] in visible_pickups(other),
+                    "inventory_here": delta(inv0, rewards(actor)["inventory"]),
+                    f"inventory_{on}": delta(inv0_other, rewards(other)["inventory"])}
+    res["pickup"] = pick
+    for g in (a, b):
+        g.exec("kd god 0")
+    if not any(r["dead_on_a"] for r in rows):
+        return None, {"why": "no enemy died on A", **res}
+    xp_ok = after["A"]["xp"] == after["B"]["xp"] and after["A"]["xp"] != before["A"]["xp"]
+    kills_ok = after["A"]["kills"] == after["B"]["kills"]
+    dead_ok = all(r["kill_counted_on_b"] for r in rows if r["dead_on_a"])
+    # one set of drops: both copies show the same items on the ground, and picking one up removes it on the other
+    same_drops = res["pickups_left_on_ground"]["A"] == res["pickups_left_on_ground"]["B"] and         res["itemDrops_added"]["A"] == res["itemDrops_added"]["B"]
+    tried = [v for v in pick.values() if isinstance(v, dict)]
+    picked_once = all(v.get("still_on_" + o) is not True for v in tried for o in ("A", "B"))
+    drops_once = same_drops and picked_once
+    res["checks"] = {"xp_equal_and_gained": xp_ok, "kill_counts_equal": kills_ok, "kill_counted_on_both": dead_ok,
+                     "same_drops_on_both": same_drops, "pickup_removes_it_for_the_other": picked_once}
+    if not xp_ok or not kills_ok or not dead_ok:
+        return False, res
+    if not new["A"] and not new["B"]:
+        return None, {"why": "nothing dropped on either copy this time (XP and kills agreed)", **res}
+    return drops_once, res
+
+
 SCENARIOS = {"movement": movement, "loot_and_world": loot_and_world, "client_loot": client_loot,
              "host_world_objects": host_world_objects, "client_world_objects": client_world_objects,
              "checkpoint": checkpoint, "rejoin": rejoin, "ranged_attacks": ranged_attacks,
-             "area_attacks": area_attacks}
+             "area_attacks": area_attacks, "drops_and_xp": drops_and_xp}
 
 
 def main(names):
