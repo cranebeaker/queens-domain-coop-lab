@@ -1964,6 +1964,72 @@ def sipeha(a, b):
                           door_vars=("Door",), open_after=False)
 
 
+def boss_reset_guard(a, b):
+    """The host's player leaves a boss fight the client is still in (the game's PlayerTeleported, which a rest, a death
+    or a teleporter runs, and its heartbeat Reset). Neither may reset the boss: same health, entrance still shut, on
+    both copies. Then, with the client gone too, the host's reset does run, and the entrance opens on BOTH copies."""
+    cls, spawner = "Shrineboss_BP", "ShrinebossSpawner"
+    boss_scenario_start(a, b, (17900, -7300, 50), (17900, -7500, 50))
+    if not ensure_boss(a, b, cls, spawner):
+        return None, {"why": "the Grave Guardian is not on both copies"}
+    res, checks = {}, {}
+    a.exec(f"callon {spawner} PlayerTeleportedOutOfBossArena")
+    time.sleep(8)
+    ensure_boss(a, b, cls, spawner)
+    entrance = getvar(a, spawner, "EntranceGate")
+    b.exec(f"activate {spawner}")
+    time.sleep(5)
+    b.exec(f"kd egoto {cls} 250")
+    b.exec(f"kd ehit {cls} 50")
+    time.sleep(3)
+    hp0 = both(lambda g: (boss_of(g, cls) or {}).get("hp"), a, b)
+    a.exec(f"callon {spawner} PlayerTeleported")
+    time.sleep(2)
+    a.exec(f"callon {spawner} Reset")
+    time.sleep(6)
+    res["hp_before"], res["hp_after"] = hp0, both(lambda g: (boss_of(g, cls) or {}).get("hp"), a, b)
+    res["entrance_after_host_left"] = both(lambda g: door_open(g, entrance), a, b)
+    checks["boss_kept_both"] = all(res["hp_after"][k] is not None and hp0[k] is not None and res["hp_after"][k] <= hp0[k] + 1
+                                   for k in ("a", "b"))
+    checks["arena_stays_locked_both"] = res["entrance_after_host_left"] == {"a": False, "b": False}
+    b.exec("tp 11000 -7000 300 0")   # the client leaves too: now the host's reset is real
+    time.sleep(6)
+    a.exec(f"callon {spawner} PlayerTeleportedOutOfBossArena")
+    time.sleep(8)
+    res["entrance_after_reset"] = both(lambda g: door_open(g, entrance), a, b)
+    checks["reset_opens_both"] = res["entrance_after_reset"] == {"a": True, "b": True}
+    boss_scenario_end(a, b)
+    res["checks"] = checks
+    return all(checks.values()), res
+
+
+def arena_pull_in(a, b):
+    """The client sets a boss fight off while the host's player stands 10 m back, outside the gate: the host's player is
+    brought next to the client before the entrance shuts, so nobody is locked out of the fight; the entrance is shut on
+    both."""
+    cls, spawner = "Shrineboss_BP", "ShrinebossSpawner"
+    boss_scenario_start(a, b, (17900, -7300, 50), (17900, -7500, 50))
+    if not ensure_boss(a, b, cls, spawner):
+        return None, {"why": "the Grave Guardian is not on both copies"}
+    res, checks = {}, {}
+    a.exec(f"callon {spawner} PlayerTeleportedOutOfBossArena")
+    time.sleep(8)
+    entrance = getvar(a, spawner, "EntranceGate")
+    a.exec("tp 17000 -7000 -50 0")   # just outside the gate, 10 m from the client
+    time.sleep(3)
+    pb = local_pos(b)
+    res["host_to_client_before_cm"] = round(dist(local_pos(a), pb))
+    b.exec(f"activate {spawner}")
+    time.sleep(6)
+    res["host_to_client_after_cm"] = round(dist(local_pos(a), local_pos(b)))
+    res["entrance"] = both(lambda g: door_open(g, entrance), a, b)
+    checks["host_brought_in"] = res["host_to_client_before_cm"] > 800 and res["host_to_client_after_cm"] < 400
+    checks["arena_locked_both"] = res["entrance"] == {"a": False, "b": False}
+    boss_scenario_end(a, b)
+    res["checks"] = checks
+    return all(checks.values()), res
+
+
 SCENARIOS = {"movement": movement, "loot_and_world": loot_and_world, "client_loot": client_loot,
              "host_world_objects": host_world_objects, "client_world_objects": client_world_objects,
              "host_gate": host_gate, "client_gate": client_gate,
@@ -1977,6 +2043,7 @@ SCENARIOS = {"movement": movement, "loot_and_world": loot_and_world, "client_loo
              "evil_fishwife": evil_fishwife, "white_tree_golem": white_tree_golem,
              "ros_dragon": ros_dragon, "josami_des": josami_des, "royal_duo": royal_duo, "black_robot_duo": black_robot_duo, "blood_pool_duo": blood_pool_duo, "cocker_boss": cocker_boss, "ribber_boss": ribber_boss,
              "demon_duo": demon_duo, "bridge_lord": bridge_lord, "blood_lords": blood_lords, "mecha_knights": mecha_knights, "queen": queen, "sipeha": sipeha,
+             "boss_reset_guard": boss_reset_guard, "arena_pull_in": arena_pull_in,
              "lag": lag}
 
 # Each group runs on a freshly booted pair, so one group's actions never leak into the next one's checks.
@@ -2127,7 +2194,8 @@ SUITES["b1"] = [["grave_guardian"], ["executioner", "lost_librarian"], ["necrono
 SUITES["b2"] = [["whaleking"], ["king_of_stone"], ["royal_fishmaner"], ["evil_fishwife"], ["white_tree_golem"]]
 SUITES["b3"] = [["ros_dragon"], ["josami_des"], ["royal_duo"], ["black_robot_duo"], ["blood_pool_duo"], ["cocker_boss", "ribber_boss"]]
 SUITES["b4"] = [["demon_duo"], ["bridge_lord"], ["blood_lords"], ["mecha_knights"], ["queen"], ["sipeha"]]
-SUITES["laneb"] = SUITES["b1"] + SUITES["b2"] + SUITES["b3"] + SUITES["b4"]
+SUITES["b5"] = [["boss_reset_guard"], ["arena_pull_in"]]
+SUITES["laneb"] = SUITES["b1"] + SUITES["b2"] + SUITES["b3"] + SUITES["b4"] + SUITES["b5"]
 SUITES["all"] = SUITES["lane1"] + SUITES["lane2"] + SUITES["laneA"] + SUITES["laneb"]
 
 
