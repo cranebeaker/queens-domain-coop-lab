@@ -160,6 +160,12 @@ def use_objects(actor, other, items, settle=6):
         after_other = obj_state(other, n, pos)
         did = after_actor != before_actor
         follows = after_other == after_actor
+        if after_other is None and before_other is not None and entry is not None:
+            # it was there before and is gone now: a broken barricade or barrel removes itself. Then the other
+            # copy's save decides (the GUIDs are the acting copy's, they are the same object on both)
+            sv = save(other).get("savableActorStates", {})
+            after_other = {"live": "removed", "saved": [sv.get(gd) for gd in entry["guids"]]}
+            follows = after_other["saved"] == after_actor["saved"]
         any_changed |= did
         if did:
             all_follow &= follows
@@ -625,7 +631,9 @@ def drops_and_xp(a, b, spot=(3000, -2000, 500), kills=10):
     # who can pick up a drop left on the ground: each copy picks up one of its own, the other copy is checked
     pick = {}
     for actor, other, an, on in ((b, a, "B", "A"), (a, b, "A", "B")):
-        mine = sorted(new[an].values(), key=lambda p: p["dist"])
+        # what is still on the ground now: with shared loot the other player's pickup may already have taken one
+        still = visible_pickups(actor)
+        mine = sorted((still[n] for n in new[an] if n in still), key=lambda p: p["dist"])
         if not mine:
             pick[an] = "no drop left on the ground on this copy"
             continue

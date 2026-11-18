@@ -6,7 +6,10 @@
   kd                    clone Knights' Domain's source branch next to this repo, build its dev flavour, install it
                         into the copies (allowed by its licence for your own use; never commit or share the build)
   bridge                build bridge/qdbridge.dll
-  all [<game dir>]      every step above, in order
+  decompile             build repak + kismet-analyzer into tools/ue, unpack copy A's pak there, decompile every
+                        Blueprint to text (tools/ue/bp) and write the co-op index (tools/ue/bp_index.md). Needs Rust
+                        (cargo) and the .NET 9 SDK; about 3 GB of disk. Local only: never commit what it extracts.
+  all [<game dir>]      every step above except decompile, in order
 
 Default game dir: C:\\Program Files (x86)\\Steam\\steamapps\\common\\QueensDomain
 Needs: Visual Studio 2022 with C++, CMake 3.25+, git, Python 3.10+, the game on Steam (Steam running).
@@ -153,6 +156,33 @@ def step_kd():
     print("Knights' Domain dev build installed into A and B")
 
 
+UE_DIR = os.path.join(LAB, "tools", "ue")
+REPAK_GIT = "https://github.com/trumank/repak"
+KA_GIT = "https://github.com/trumank/kismet-analyzer"
+
+
+def step_decompile():
+    os.makedirs(UE_DIR, exist_ok=True)
+    cargo = shutil.which("cargo") or os.path.join(os.path.expanduser("~"), ".cargo", "bin", "cargo.exe")
+    repak = os.path.join(UE_DIR, "bin", "repak.exe")
+    if not os.path.isfile(repak):
+        run([cargo, "install", "--root", UE_DIR, "--git", REPAK_GIT, "repak_cli", "--locked"])
+    ka_src, ka_bin = os.path.join(UE_DIR, "ka"), os.path.join(UE_DIR, "ka-bin")
+    if not os.path.isdir(ka_src):
+        run(["git", "clone", "--recursive", KA_GIT, ka_src])
+    if not os.path.isfile(os.path.join(ka_bin, "kismet-analyzer.exe")):
+        run(["dotnet", "build", "-c", "Release", "-o", ka_bin], cwd=ka_src)
+    unpacked = os.path.join(UE_DIR, "unpacked")
+    if not os.path.isdir(os.path.join(unpacked, "QueensDomain")):
+        pak = os.path.join(qdlab.COPIES, "A", "QueensDomain", "Content", "Paks", "QueensDomain-WindowsNoEditor.pak")
+        run([repak, "unpack", "-q", "-o", unpacked, pak])
+    bp = os.path.join(UE_DIR, "bp")
+    os.makedirs(bp, exist_ok=True)
+    run([os.path.join(ka_bin, "kismet-analyzer.exe"), "gen-cfg-tree", os.path.join(unpacked, "QueensDomain", "Content"),
+         bp, "QueensDomain"])
+    run([sys.executable, "-I", os.path.join(LAB, "tools", "bpindex.py"), bp, os.path.join(UE_DIR, "bp_index.md")])
+
+
 def step_bridge():
     cmake_build(os.path.join(LAB, "bridge"), os.path.join(LAB, "bridge", "build"))
 
@@ -163,7 +193,7 @@ if __name__ == "__main__":
         sys.exit(__doc__)
     game = a[1] if len(a) > 1 else DEFAULT_GAME
     steps = {"copies": lambda: step_copies(game), "dumper": step_dumper, "sdk": step_sdk, "kd": step_kd,
-             "bridge": step_bridge}
+             "bridge": step_bridge, "decompile": step_decompile}
     if a[0] == "all":
         for s in ("copies", "dumper", "sdk", "kd", "bridge"):
             steps[s]()
