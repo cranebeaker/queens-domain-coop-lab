@@ -724,11 +724,98 @@ def death(a, b, wait_s=120, spot=(3000, -2000, 500)):
     return death_anim and synced and same_world, res
 
 
+def host_leaves(a, b, spot=(3000, -2000, 500), after_s=60):
+    """Mid-fight, the host's game is killed (like a crash or Alt+F4). The client keeps playing: it stays in its world,
+    the host's knight goes away, the enemies around it keep fighting (they hit the client), and the client's own hits
+    still hurt them. Records the client's mod log from the moment the host went away."""
+    b.exec("kd god 1")
+    a.exec("kd god 1")
+    a.exec(f"tp {spot[0]} {spot[1]} {spot[2]} 0")
+    time.sleep(3)
+    pa = local_pos(a)
+    b.exec(f"tp {pa[0] + 200} {pa[1]} {pa[2] + 50} 0")
+    time.sleep(4)
+    near = lambda g: [e for e in enemies(g) if dist(e["pos"], local_pos(g)) < 2500]
+    # start the fight: A hits everything close (so the host owns it) and wakes it up
+    for e in near(a):
+        a.exec(f"kd ehit {e['name']} 1")
+        time.sleep(0.3)
+    time.sleep(4)
+    owners_before = {}
+    lf = len(kd_log_all("B"))
+    b.exec("kd elist")
+    time.sleep(1)
+    for line in kd_log_all("B")[lf:]:
+        if "[edbg] E " in line:
+            o = dict(f.split("=", 1) for f in line.split() if "=" in f).get("owner", "?")
+            owners_before[o] = owners_before.get(o, 0) + 1
+    before = {"b_enemies_within_25m": len(near(b)), "b_sees_a": len([q for q in remote_players(b) if not q["hidden"]]),
+              "b_enemy_owners": owners_before}
+    log_from = len(kd_log_all("B"))
+    b.exec("watch start 3000")
+    t0 = time.time()
+    rig.qdlab.stop_copy("A")   # the host is gone without a goodbye
+    gone_s = round(time.time() - t0, 1)
+    track, puppet_gone_at = [], None
+    pos0 = {e["name"]: e["pos"] for e in near(b)}
+    while time.time() - t0 < after_s:
+        t = round(time.time() - t0, 1)
+        vis = len([q for q in safe(lambda: remote_players(b), []) if not q["hidden"]])
+        if vis == 0 and puppet_gone_at is None:
+            puppet_gone_at = t
+        track.append(t)
+        time.sleep(2)
+    b.exec("watch stop")
+    w = b.state(sections=["watch"])["watch"]
+    hits_on_b = [h for h in w["health"]["hits"] if h["ms"] > 3000]   # hits taken after the host was gone
+    now = {e["name"]: e for e in near(b)}
+    moved = sum(1 for n, p in pos0.items() if n in now and dist(now[n]["pos"], p) > 100)
+    # B's own hit on an enemy after the host left
+    target = sorted(now.values(), key=lambda e: dist(e["pos"], local_pos(b)))
+    hit = None
+    if target:
+        en = target[0]
+        lf = len(kd_log_all("B"))
+        b.exec(f"kd ehit {en['name']} 4000")
+        time.sleep(4)
+        after = next((e for e in b.state(sections=["enemies"])["enemies"] if e["name"] == en["name"]), None)
+        hit = {"enemy": en["class"], "hp_before": en.get("hp"), "dead_after": after is None or after["dead"],
+               "log": [l.split("] ", 2)[-1].strip()[:120] for l in kd_log_all("B")[lf:] if "[edbg]" in l][:2]}
+    words = ("session", "peer", "disconnect", "timeout", "timed out", "host", "left", "owner", "lost")
+    blog = [l.split("] ", 1)[-1].strip()[:150] for l in kd_log_all("B")[log_from:]
+            if any(x in l.lower() for x in words) and "[smoke]" not in l and "[dev]" not in l]
+    owner_lines = [l for l in blog if "owner " in l]
+    noticed = None
+    for l in kd_log_all("B")[log_from:]:   # when did B notice: the first disconnect line, against the kill time
+        if "disconnected" in l or "host lost" in l:
+            try:
+                hh, mm, ss = l[1:13].split(":")
+                lt = time.localtime(t0)
+                noticed = round((int(hh) - lt.tm_hour) * 3600 + (int(mm) - lt.tm_min) * 60 + float(ss) - lt.tm_sec
+                                - (t0 % 1), 1)
+            except ValueError:
+                pass
+            break
+    res = {"before": before, "host_killed_in_s": gone_s, "watched_s": after_s,
+           "b_inworld": safe(lambda: b.eval("inworld"), False), "b_world": safe(lambda: b.eval("world"), "?"),
+           "b_noticed_host_gone_after_s": noticed, "b_puppet_of_a_gone_after_s": puppet_gone_at,
+           "b_enemies_moved_more_than_1m": f"{moved} of {len(pos0)}",
+           "b_hits_taken_after_host_left": len(hits_on_b),
+           "b_hit_after_host_left": hit,
+           "b_log_owner_changes": len(owner_lines), "b_log": [l for l in blog if "owner " not in l][:14] + owner_lines[:4]}
+    b.exec("kd god 0")
+    checks = {"b_still_in_world": bool(res["b_inworld"]), "host_knight_removed": puppet_gone_at is not None,
+              "enemies_keep_fighting": bool(hits_on_b) or moved > 0,
+              "b_hits_still_hurt": bool(hit and hit["dead_after"])}
+    res["checks"] = checks
+    return all(checks.values()), res
+
+
 SCENARIOS = {"movement": movement, "loot_and_world": loot_and_world, "client_loot": client_loot,
              "host_world_objects": host_world_objects, "client_world_objects": client_world_objects,
              "checkpoint": checkpoint, "rejoin": rejoin, "ranged_attacks": ranged_attacks,
              "area_attacks": area_attacks, "drops_and_xp": drops_and_xp,
-             "enemy_hp_agree": enemy_hp_agree, "death": death}
+             "enemy_hp_agree": enemy_hp_agree, "death": death, "host_leaves": host_leaves}
 
 
 def main(names):
