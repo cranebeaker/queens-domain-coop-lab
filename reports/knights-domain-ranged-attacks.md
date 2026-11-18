@@ -1,4 +1,4 @@
-# DRAFT: enemy projectiles exist only on the machine that runs the enemy
+# DRAFT: enemy projectiles and area attacks exist only on the machine that runs the enemy
 
 Draft for a comment on Knights' Domain issue 2 ("Enemy and Boss Special Attacks not Replicating over Network",
 part ②), since that issue already covers it. Agree on it in a PR before anyone posts it.
@@ -30,9 +30,22 @@ machine the arrows fly straight through the spot where the client is standing an
 
 **What we expected:** the client sees the arrows, and an arrow passing through the client hits the client.
 
+**Area attacks, same result** (a second test, also two fresh runs): the Ruins dragon boss (`Dragon_Green_BP_C`)
+fights the host for 75 s while the client (god mode) is kept about 1.5 m from the host. Both machines play the same
+boss montages (`Dragon_Atk_FireBreath_Montage`, `Dragon_Air_Atk_Fireballs_Montage`, ...), but:
+
+| | Host (targeted) | Client (1.5 m away) |
+|---|---|---|
+| `Dragon_FirePuddle_C` seen | 59 / 16 | 0 / 0 |
+| `Dragon_Fireball_C` seen | 0 / 9 | 0 / 0 |
+| `Dragon_FlamebreathProjectile_C` seen | 48 / 16 | 0 / 0 |
+| Hits with a puddle / fireball / flame closest | 16 + 0 + 91 / 22 + 17 + 32 | 0 / 0 |
+
+So puddles and fireball blasts, like projectiles, only exist (and only hurt) on the machine that runs the boss.
+
 **What we noticed in the 1.0.3 source:** followers replay `AttackStart` as the generic attack montage, which the
-comment above `kCustomAttacks` in EnemySync.cpp says "shows the swing but deals no damage". The arrow is spawned by
-the attack Blueprint, which only runs on the owner. One idea, if useful: a small `ProjectileSpawned` event from the
+comment above `kCustomAttacks` in EnemySync.cpp says "shows the swing but deals no damage". The arrows, puddles and
+fireballs are spawned by the attack Blueprints, which only run on the owner. One idea, if useful: a small `ProjectileSpawned` event from the
 owner (class, transform, velocity) that followers spawn locally as a visual, plus the owner checking projectile
 overlaps against the other players' positions, so a projectile can hit anyone in its path.
 

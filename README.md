@@ -70,9 +70,9 @@ walls, pickups, quest state; with their save GUIDs and live state), `checkpoints
 
 `exec`: `newgame <slot>`, `loadslot <slot>`, `skipintro`, `tp x y z [yaw]`, `tpto <actor> [cm]`,
 `interact <actor>` (any actor with an Interact event: pickup, chest, lever, checkpoint), `call <BP function with no params>` on the player, `kd <line>` (the mod's dev command file),
-`watch start [radius cm]` / `watch stop`: on the game thread every 50 ms, record each actor within the radius whose
-class or a parent class name contains Projectile, Arrow, Splash, Vortex, Whirl, Wave, AOE or Spit (class, instigator,
-closest approach), and every drop in the local player's health with the closest such actor at that moment. With the
+`watch start [radius cm] [word ...]` / `watch stop`: on the game thread every 50 ms, record each actor within the radius whose
+class or a parent class name contains one of the words (default: Projectile, Arrow, Splash, Vortex, Whirl, Wave, AOE,
+Spit, Puddle, Fireball, Creep, Explosion, Shockwave) with its class, instigator and closest approach, and every drop in the local player's health with the closest such actor at that moment. With the
 mod's `kd god` on, health sits near 1,000,000 and is only refilled below 100,000, so every hit leaves a dent.
 
 `eval`: `world`, `title`, `loading`, `inworld`, `health`.
@@ -91,6 +91,7 @@ Each row ran twice from a fresh boot with the same result. "Gap" means the scena
 | checkpoint | FAIL (gap) | A rested at `Checkpoint17`: A's save got `lastCheckpoint` and `savePointsVisited` = `GR_Camp_Save`; B's save unchanged |
 | rejoin | FAIL (gap) | B left and joined again after A opened `Chest10_2`: the rejoined B loads its own new world with the chest closed. Old teammate model removed and a new one spawned correctly |
 | ranged_attacks | FAIL (gap) | Two `Mossy_Archer_BP_C` shoot at A (10 m away) for 30 s, B in god mode stands on the line halfway (0 cm off it). Both copies play `Boner_Bow_Attack` on the archers (owner P1), but the arrows (`Mossy_Arrow_Projectile_C`) exist only on A: A saw 12 / 11 arrows and took 11 / 11 hits; B saw 0 arrows and took 0 hits |
+| area_attacks | FAIL (gap) | The Ruins dragon boss (`Dragon_Green_BP_C`) fights A for 75 s, B in god mode kept a median 1.5 m from A. Both copies play the same boss montages (fire breath, air fireballs), but fire puddles (`Dragon_FirePuddle_C`), fireballs (`Dragon_Fireball_C`) and flame-breath projectiles exist only on A: A saw 59 + 0 + 48 / 16 + 9 + 16 of them and took 16 + 0 + 91 / 22 + 17 + 32 hits from them; B saw none and took 0 hits |
 
 In short, version 1.0.3 shares players and enemies, but no world object, pickup, checkpoint or save state, in either
 direction. Every player plays in their own world. The `WorldFlags` and `InteractRequest` messages in its protocol are
@@ -102,9 +103,11 @@ defined but never sent.
   name belongs (`GetStaticName(L"TitleScreenUI_C", ...)`). Calling one is a fatal `Failed to find function`. The
   bridge calls BP functions by name with the SDK parameter structs instead. Engine-class wrappers are fine.
 - If `CMAKE_TOOLCHAIN_FILE` is set in your environment (an Android NDK install sets it), CMake configures fail; `setup.py` drops it for its own builds.
+- `rig.py stop` waits for the copies to exit. A copy relaunched while the old process still holds the mod's log
+  cannot rotate it and runs with no log at all (the mod still works).
 - The bridge pumps inside `ProcessEvent` of a few native vtables (UUserWidget, AFS_PlayerCharacter,
   APlayerController), the same context the title-screen buttons run in.
 
 ## Next scenarios
 
-See [TASKS.md](TASKS.md). Lane 1 (world, loot, saves) is measured above; Lane 2 (combat, death, network) is in progress: `ranged_attacks` is measured above.
+See [TASKS.md](TASKS.md). Lane 1 (world, loot, saves) is measured above; Lane 2 (combat, death, network) is in progress: `ranged_attacks` and `area_attacks` are measured above.

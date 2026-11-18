@@ -309,9 +309,96 @@ def ranged_attacks(a, b, seconds=30):
     return b_sees and sb["hits_with_watched_actor_close"] > 0, res
 
 
+AREA_WORDS = ("Puddle", "Fireball", "Creep", "Explosion", "Shockwave", "Splash", "Vortex", "Whirl", "Wave", "AOE")
+
+
+def hits_by_class(w, near_cm):
+    """Each health dent credited to the class of the closest watched actor (within `near_cm`), else 'none close'."""
+    cls_of = {r["name"]: r["class"] for r in w["actors"] if "FX" not in r["class"]}
+    out = {}
+    for h in w["health"]["hits"]:
+        k = cls_of.get(h["nearest"]) if h["nearest"] and h["nearestDist"] <= near_cm else None
+        k = k or "none close"
+        c = out.setdefault(k, {"hits": 0, "damage": 0.0})
+        c["hits"] += 1
+        c["damage"] += h["amount"]
+    return {k: {"hits": v["hits"], "damage": round(v["damage"])} for k, v in out.items()}
+
+
+def area_attacks(a, b, seconds=75, near_cm=500):
+    """The Ruins dragon boss fights A (A keeps hitting it, so it stays on A); B in god mode is kept 1.5 m from A.
+    Shared area attacks: B sees the fire puddles and fireball blasts around A and takes damage from them. Hits are
+    credited to the closest watched actor's class, so flame-breath projectiles are counted apart from the area ones."""
+    boss = "Dragon_Green"
+    for g in (a, b):
+        g.exec("kd god 1")
+    time.sleep(1.5)
+    a.exec("tp -28574 754 -12500 0")   # the boss arena (the dragon sleeps here in trap mode until woken)
+    time.sleep(3)
+    a.exec(f"kd egoto {boss} 1200")
+    time.sleep(2)
+    a.exec(f"kd ewake {boss}")
+    time.sleep(4)
+    dragons = [e for e in enemies(a) if boss in e["class"]]
+    if not dragons:
+        return None, {"why": f"no {boss} near A after waking it"}
+    target = dragons[0]["name"]
+    hp_before = dragons[0].get("hp")
+    log_from = {n: len(kd_log_all(n)) for n in ("A", "B")}
+    for g in (a, b):
+        g.exec("watch start 6000")
+    gaps = []
+    end = time.time() + seconds
+    next_hit = 0.0
+    while time.time() < end:
+        if time.time() >= next_hit:
+            a.exec(f"kd ehit {target} 1")   # last hitter within 6 s owns and targets
+            next_hit = time.time() + 3
+        pa = local_pos(a)
+        b.exec(f"tp {pa[0] + 150} {pa[1]} {pa[2] + 30} 0")
+        time.sleep(0.6)
+        gaps.append(round(dist(local_pos(b)[:2], local_pos(a)[:2])))
+        b.exec(f"kd elist {boss}")
+        a.exec(f"kd elist {boss}")
+        time.sleep(1.4)
+    for g in (a, b):
+        g.exec("watch stop")
+    wa = a.state(sections=["watch"])["watch"]
+    wb = b.state(sections=["watch"])["watch"]
+    for g in (a, b):
+        g.exec("kd god 0")
+    time.sleep(1)
+
+    def side(w, name):
+        actors = {}
+        for r in w["actors"]:
+            if "FX" in r["class"]:   # level effects (waterfall / swamp splashes) match the words but are not attacks
+                continue
+            kind = "area" if any(x in r["class"] for x in AREA_WORDS) else "projectile"
+            c = actors.setdefault(r["class"], {"kind": kind, "count": 0, "closest_cm": None})
+            c["count"] += 1
+            c["closest_cm"] = r["minDist"] if c["closest_cm"] is None else min(c["closest_cm"], r["minDist"])
+        montages, owners = elist_montages(name, boss, log_from[name])
+        return {"actors": actors, "hits": len(w["health"]["hits"]), "damage": round(w["health"]["damage"]),
+                "hits_by_closest_class": hits_by_class(w, near_cm), "boss_montages": montages, "boss_owners": owners}
+
+    sa, sb = side(wa, "A"), side(wb, "B")
+    after = [e for e in enemies(a) if e["name"] == target]
+    res = {"boss": target, "boss_hp": [hp_before, after[0].get("hp") if after else None], "seconds": seconds,
+           "b_to_a_cm": {"median": sorted(gaps)[len(gaps) // 2] if gaps else None, "max": max(gaps) if gaps else None},
+           "a": sa, "b": sb}
+    area_hits = lambda s: sum(v["hits"] for k, v in s["hits_by_closest_class"].items()
+                              if any(x in k for x in AREA_WORDS))
+    if area_hits(sa) == 0:
+        return None, {"why": "A was never hit with an area-attack actor close: the boss did not use one on A", **res}
+    b_sees_area = any(v["kind"] == "area" for v in sb["actors"].values())
+    return b_sees_area and area_hits(sb) > 0, res
+
+
 SCENARIOS = {"movement": movement, "loot_and_world": loot_and_world, "client_loot": client_loot,
              "host_world_objects": host_world_objects, "client_world_objects": client_world_objects,
-             "checkpoint": checkpoint, "rejoin": rejoin, "ranged_attacks": ranged_attacks}
+             "checkpoint": checkpoint, "rejoin": rejoin, "ranged_attacks": ranged_attacks,
+             "area_attacks": area_attacks}
 
 
 def main(names):

@@ -377,7 +377,8 @@ struct Watch {
     bool on = false;
     ULONGLONG t0 = 0, lastSample = 0;
     double radiusCm = 6000;
-    std::vector<std::string> words{"Projectile", "Arrow", "Splash", "Vortex", "Whirl", "Wave", "AOE", "Aoe", "Spit"};
+    std::vector<std::string> words{"Projectile", "Arrow", "Splash", "Vortex", "Whirl", "Wave", "AOE", "Aoe", "Spit",
+                                   "Puddle", "Fireball", "Creep", "Explosion", "Shockwave"};
     std::map<std::string, WatchRec> seen;          // by actor name (names carry a unique number)
     std::map<SDK::UClass*, bool> classMatch;       // cache: does this class match a watch word
     double hpStart = 0, hpMin = 0, hpLast = 0, damage = 0;
@@ -565,13 +566,14 @@ public:
             if (!p || !CallNoParams(p, fn)) throw cb::Error(cb::errc::kInvalidParams, "cannot call " + fn);
             return {true, "called " + fn};
         }
-        if (cmd == "watch") {   // watch start [radius cm] | watch stop: see WatchTick; read with state section "watch"
+        if (cmd == "watch") {   // watch start [radius cm] [word ...] | watch stop: see WatchTick; read with state "watch"
             std::string sub; in >> sub;
             if (sub == "start") {
                 double r = 6000; in >> r;
-                const auto words = g_watch.words;
+                std::vector<std::string> words;
+                for (std::string w; in >> w;) words.push_back(w);
                 g_watch = Watch{};
-                g_watch.words = words;
+                if (!words.empty()) g_watch.words = words;   // default: the list in Watch
                 g_watch.radiusCm = r > 0 ? r : 6000;
                 g_watch.t0 = GetTickCount64();
                 g_watch.on = true;

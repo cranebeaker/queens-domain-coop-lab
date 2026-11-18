@@ -170,17 +170,28 @@ def lab_pids():
     return res
 
 
+def wait_gone(pids, timeout=30):
+    """Wait until these processes have exited: a copy relaunched while the old one still holds its files (the mod's
+    log, which it rotates at start) runs without a log."""
+    end = time.time() + timeout
+    while time.time() < end and any(p in pids for p, _ in lab_pids()):
+        time.sleep(0.5)
+
+
 def stop():
-    for pid, _ in lab_pids():
+    pids = [pid for pid, _ in lab_pids()]
+    for pid in pids:
         subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+    wait_gone(pids)
 
 
 def stop_copy(name):
     """Kill only the copy started from copies/<name>."""
     prefix = os.path.normcase(os.path.join(COPIES, name) + os.sep)
-    for pid, path in lab_pids():
-        if os.path.normcase(path).startswith(prefix):
-            subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+    pids = [pid for pid, path in lab_pids() if os.path.normcase(path).startswith(prefix)]
+    for pid in pids:
+        subprocess.run(["taskkill", "/F", "/PID", str(pid)], capture_output=True)
+    wait_gone(pids)
 
 
 if __name__ == "__main__":
