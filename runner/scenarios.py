@@ -1685,6 +1685,125 @@ def boss_encounter(a, b, cls, spawner, spot, start, levels, door_vars=(), doors=
     return all(checks.values()), res
 
 
+def ros_dragon(a, b):
+    """Ruins of Sorrow dragon (Dekanima). The CLIENT sets its spawner off and it runs on the host's copy too; the
+    dragon wakes on both copies; its attacks hit each player; it lies downed on both, each player loots their own copy
+    (the reward talk) and both saves have ROSDragonDead. (Its door shuts from the arena trigger after the egg's hatch
+    sequence, which the rig does not play, so the door is not checked here.)"""
+    log_from = {n: len(kd_log_all(n)) for n in ("A", "B")}
+
+    def extra(a, b, res, checks):
+        sent, ran = calls_between(log_from, "B", "A", ("Activate",))
+        res["activate"] = {"sent_by_client": sent, "ran_on_host": ran}
+        checks["start_follows"] = bool(sent) and len(ran) == len(sent)
+
+    return boss_encounter(a, b, "Dragon_Ros", "ROSDragon_Spawner", (3549, 9691, -6080),
+                          ("b", "activate ROSDragon_Spawner"), "ROS", flags=("ROSDragonDead",),
+                          talk_counter="ROSDragonRewardCount", boss_end="RewardDialogueEnded", extra=extra)
+
+
+def calls_between(log_from, sender, receiver, words):
+    """BossSync calls whose function starts with one of `words` that `sender` ("A"/"B") sent and `receiver` ran."""
+    sent = [ln.split("[bosssync] sent ")[1].split(" (")[0] for ln in kd_log_all(sender)[log_from[sender]:]
+            if "[bosssync] sent " in ln]
+    ran = [ln.split("[bosssync] ran ")[1].split(" on ")[0] for ln in kd_log_all(receiver)[log_from[receiver]:]
+           if "[bosssync] ran " in ln]
+    return [x for x in sent if x.startswith(words)], [x for x in ran if x.startswith(words)]
+
+
+def josami_des(a, b):
+    """Josami Des (Depths). The CLIENT starts the blood pool fight (the pool's BeginFight: the dome shuts, the knights
+    rise) and it starts on the host's copy too; the knights' attacks hit each player; when the pool and its knights
+    are down and the host's player has talked to the knight that kneels, its FinishFight (the dome dropping) runs on
+    both and both saves have BloodAngelJosamiDefeated.
+    (The dome's blocker is an invisible mesh whose switches do not show its state, so the dome is checked through
+    the fight's own calls.)"""
+    spawner = "Josami_Des_BloodPoolSpawner_2"
+    log_from = {n: len(kd_log_all(n)) for n in ("A", "B")}
+    ok, res = boss_encounter(a, b, "JosamiBloodPool", spawner, (-19155, -10812, -16600),
+                             # the pool's event trigger runs BeginFight when a player steps in: the dome shuts
+                             ("b", f"activate {spawner} ; callon {spawner} BeginFight"), "SZ_Depths", partners=(),
+                             spawn_first=False, open_after=False, goto_cm=900)
+    if ok is None:
+        return ok, res
+    checks = res["checks"]
+    sent, ran = calls_between(log_from, "B", "A", ("BeginFight",))
+    res["begin_fight"] = {"sent_by_client": sent, "ran_on_host": ran}
+    checks["fight_start_follows"] = bool(sent) and len(ran) >= 1
+    time.sleep(6)
+    # the fight ends when the knights are down too (the pool no longer raises them): the host's player kills them
+    for _ in range(40):
+        alive = [x["name"] for x in a.state(sections=["enemies"])["enemies"]
+                 if "JosamiKnight" in x["class"] and not x["dead"]]
+        if not alive:
+            break
+        a.exec(f"kd ehit {alive[0]} 9000")
+        time.sleep(1.5)
+    time.sleep(8)
+    # the last knight kneels; talking to it ends the fight (its FinishFight): the host's player talks to the knights
+    res["talked_to"] = []
+    for k in [x["name"] for x in a.state(sections=["enemies"])["enemies"] if "JosamiKnight" in x["class"]][:6]:
+        res["talked_to"].append(k)
+        talk_reward(a, k)
+        if calls_between(log_from, "A", "B", ("FinishFight",))[0]:
+            break
+    time.sleep(6)
+    sent, ran = calls_between(log_from, "A", "B", ("FinishFight",))
+    res["finish_fight"] = {"sent_by_host": sent, "ran_on_client": ran}
+    checks["fight_end_follows"] = bool(sent) and len(ran) >= 1
+    # its end saves the spawner's own flag (BloodAngelJosamiDefeated) and records the kills
+    flag = getvar(a, spawner, "NamedSaveDataToCheck") or "BloodAngelJosamiDefeated"
+    res["saves"] = both(lambda g: named(g, flag), a, b)
+    checks["defeated_flag_both"] = all((x.get(flag) or 0) >= 1 for x in res["saves"].values())
+    res["checks"] = checks
+    return all(checks.values()), res
+
+
+def royal_duo(a, b):
+    """Royal Duo (Castle). The CLIENT starts the fight: the arena door shuts and BOTH the Fated Wheeler and the Lordly
+    Spiker are there on both copies (the Spiker only spawned for the player who started it); their attacks hit each
+    player; both die on both copies, both saves have RoyalDuoDefeated and the door opens on both."""
+    return boss_encounter(a, b, "Fated_Wheeler_Miniboss", "Fated_Wheeler_MinibossSpawner_2", (-67332, -20063, -36700),
+                          ("b", "callon Fated_Wheeler_MinibossSpawner_2 StartFight"), "loc:Castle_Teleporter", door_vars=("ArenaDoor",),
+                          partners=("Lordly_Spiker_Miniboss",), partner_spawners=("Lordly_Spiker_Miniboss_Spawner_2",),
+                          flags=("RoyalDuoDefeated",))
+
+
+def black_robot_duo(a, b):
+    """Black Robot Duo (Castle). The CLIENT starts the fight: the door shuts and both robots are there on both copies;
+    the large robot's flamethrower and the drill robot's attacks hit each player; both die on both copies, both saves
+    have BlackRobotsDefeated and the door opens on both."""
+    return boss_encounter(a, b, "LargeRobot_Miniboss", "LargeRobot_Miniboss_Spawner_2", (-60606, -24300, -38480),
+                          ("b", "callon LargeRobot_Miniboss_Spawner_2 StartFight"), "loc:Castle_Teleporter",
+                          door_vars=("Door", "ArenaDoor", "FrontDoor"), partners=("DrillRobot_Miniboss",),
+                          partner_spawners=("DrillRobot_Miniboss_Spawner_2",), flags=("BlackRobotsDefeated",))
+
+
+def blood_pool_duo(a, b):
+    """Blood Pool Duo (Castle). The CLIENT starts the fight: both doors shut and the Stalker and the Snail Bull rise
+    from the pool on both copies; their attacks hit each player; the pool dies on both, both saves have
+    BloodDuoDefeated and the doors open on both."""
+    return boss_encounter(a, b, "BloodPool_FakeEnemy", "BloodPool_EnemySpawner_2", (-52089, -20628, -36800),
+                          ("b", "callon BloodPool_EnemySpawner_2 StartFight"), "loc:Castle_Teleporter", door_vars=("FrontDoor", "RearDoor"),
+                          partners=("Stalker_Miniboss", "SnailBull_Miniboss"),
+                          partner_spawners=("Miniboss_Stalker_Spawner_2", "SnailBull_Miniboss_Spawner_2"),
+                          flags=("BloodDuoDefeated",), fight_cls="Stalker_Miniboss")
+
+
+def cocker_boss(a, b):
+    """Cocker miniboss (Aqua Ruins depths). It wakes for the CLIENT; its area attack hits each player it fights (it only
+    reached the machine that runs it before); it dies on both and both saves have AquaRuinsCockerMiniboss."""
+    return boss_encounter(a, b, "Cocker_Boss", "EnemySpawner2", (-9921, -14900, -5100),
+                          ("b", "kd ewake Cocker_Boss"), "AquaRuins", flags=("AquaRuinsCockerMiniboss",))
+
+
+def ribber_boss(a, b):
+    """Ribber miniboss (Aqua Ruins depths). It wakes for the CLIENT; its area attack hits each player it fights; it dies
+    on both and both saves have AquaRuinsRibberMiniboss."""
+    return boss_encounter(a, b, "Ribber_Boss", "EnemySpawner", (-5671, -11250, -2650),
+                          ("b", "kd ewake Ribber_Boss"), "AquaRuins", flags=("AquaRuinsRibberMiniboss",))
+
+
 SCENARIOS = {"movement": movement, "loot_and_world": loot_and_world, "client_loot": client_loot,
              "host_world_objects": host_world_objects, "client_world_objects": client_world_objects,
              "host_gate": host_gate, "client_gate": client_gate,
@@ -1696,6 +1815,7 @@ SCENARIOS = {"movement": movement, "loot_and_world": loot_and_world, "client_loo
              "lost_librarian": lost_librarian,
              "whaleking": whaleking, "king_of_stone": king_of_stone, "royal_fishmaner": royal_fishmaner,
              "evil_fishwife": evil_fishwife, "white_tree_golem": white_tree_golem,
+             "ros_dragon": ros_dragon, "josami_des": josami_des, "royal_duo": royal_duo, "black_robot_duo": black_robot_duo, "blood_pool_duo": blood_pool_duo, "cocker_boss": cocker_boss, "ribber_boss": ribber_boss,
              "lag": lag}
 
 # Each group runs on a freshly booted pair, so one group's actions never leak into the next one's checks.
@@ -1844,7 +1964,8 @@ SUITES = {
 # Lane B: each boss changes the world for good (a defeated boss stays defeated): one fresh pair per area group
 SUITES["b1"] = [["grave_guardian"], ["executioner", "lost_librarian"], ["necronomicon"]]
 SUITES["b2"] = [["whaleking"], ["king_of_stone"], ["royal_fishmaner"], ["evil_fishwife"], ["white_tree_golem"]]
-SUITES["laneb"] = SUITES["b1"] + SUITES["b2"]
+SUITES["b3"] = [["ros_dragon"], ["josami_des"], ["royal_duo"], ["black_robot_duo"], ["blood_pool_duo"], ["cocker_boss", "ribber_boss"]]
+SUITES["laneb"] = SUITES["b1"] + SUITES["b2"] + SUITES["b3"]
 SUITES["all"] = SUITES["lane1"] + SUITES["lane2"] + SUITES["laneA"] + SUITES["laneb"]
 
 
