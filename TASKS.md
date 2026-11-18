@@ -7,19 +7,20 @@ Each task is one scenario in `runner/scenarios.py` (plus any bridge commands it 
 A scenario passes when the co-op behaviour is right, so a gap shows up as FAIL with the numbers that prove it.
 Run every scenario at least twice before calling a result.
 
-## Lane 1 (owner): world, loot, saves
+## Lane 1 (owner): world, loot, saves (done)
 
-| # | Scenario | What to measure |
+All measured: two clean runs of `py -3 -I runner/scenarios.py --suite lane1`, identical. Details in the README.
+
+| # | Scenario | Result |
 |---|---|---|
-| 1 | `loot_and_world` (done, gap) | host picks up an item: nothing reaches the client |
-| 2 | `client_loot` (done, gap) | client picks up an item: nothing reaches the host |
-| 3 | `host_world_objects` / `client_world_objects` (done, gap) | chest, lever, secret wall used on one side change only on that side |
-| 4 | `checkpoint` (done, gap) | host rests at a checkpoint: only the host's save records it |
-| 5 | teleporters (folded into 4) | checkpoints are the teleport destinations; `savePointsVisited` is not shared |
-| 6 | `rejoin` (done, gap) | a rejoining client gets its own fresh world, not the host's |
-
-Lane 1 follow-ups: secret walls that need a hit instead of an interact, a door that needs a key, and whether the
-client can walk through a gate the host opened (needs a movement check, not just the save state).
+| 1 | `loot_and_world` | gap: a host pickup never reaches the client |
+| 2 | `client_loot` | gap: a client pickup never reaches the host |
+| 3 | `host_world_objects`, `client_world_objects` | gap: chest, secret wall, door, keyed door, lift, barrel, barricade change for the user only |
+| 4 | `host_gate`, `client_gate` | gap: a lever opens the gate for the puller only; the other player is physically blocked |
+| 5 | `checkpoint`, `client_checkpoint` | gap: resting (checkpoint, visited list, teleport points) is saved for the rester only |
+| 6 | `story_flags` | gap: story counters and the saved world differ after the host's actions |
+| 7 | `rejoin` | gap: a rejoining client gets a fresh world |
+| 8 | `client_progress_persists` | works: the client's own items and checkpoint survive save and reload |
 
 ## Lane 2 (friend): combat, death, network
 

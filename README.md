@@ -46,9 +46,10 @@ public, so results here are for 1.0.3 until it is.
 ## Run it
 
 ```
-py -3 -I runner/rig.py pair          # boots A (host) and B (client), ~2.5 min
-py -3 -I runner/scenarios.py         # runs every scenario against the running pair
-py -3 -I runner/rig.py stop          # kills the lab copies (never the real game)
+py -3 -I runner/scenarios.py --suite lane1   # boots fresh pairs itself and runs all of Lane 1, ~12 min
+py -3 -I runner/rig.py pair                  # or: boot A (host) and B (client) by hand, ~2.5 min
+py -3 -I runner/scenarios.py host_gate       # ... and run single scenarios against the running pair
+py -3 -I runner/rig.py stop                  # kills the lab copies (never the real game)
 ```
 
 Poke a copy by hand:
@@ -65,31 +66,62 @@ py -3 -I runner/rig.py exec A "kd enemy"            # any Knights' Domain dev co
 unlockedTeleporters, killedEnemyCounts, xp, level, lastCheckpoint), `enemies` (within 60 m: class, pos, hp, dead,
 aiDisabled), `players` (player characters in the world), `puppets` (the mod's knight bodies of remote players),
 `pickups` (item pickups within 60 m), `savables` (saved world objects within 60 m: chests, levers, gates, secret
-walls, pickups, quest state; with their save GUIDs and live state), `checkpoints` (loaded checkpoints). Save also has
-`savePoint` and `savePointsVisited`.
+walls, pickups, quest state; with their save GUIDs and live state), `savables_all` (the same for everything loaded),
+`checkpoints` (loaded checkpoints). Save also has `savePoint` and `savePointsVisited`.
+
+Actor names repeat across sublevels; every command that takes a name uses the loaded actor of that name nearest to
+the player.
 
 `exec`: `newgame <slot>`, `loadslot <slot>`, `skipintro`, `tp x y z [yaw]`, `tpto <actor> [cm]`,
-`interact <actor>` (any actor with an Interact event: pickup, chest, lever, checkpoint), `call <BP function with no params>` on the player, `kd <line>` (the mod's dev command file).
+`tpside <actor> <cm> [up]` (stand on a chosen side along its facing), `interact <actor>` (any actor with an Interact
+event: pickup, chest, door, lever, secret wall, checkpoint), `activate <actor>` / `deactivate <actor>` (lifts, doors,
+switches), `callon <actor> <function>` (any function with no parameters, e.g. `InsertKey`, `Break`), `breakhp <barricade>`
+(HP to 0, then the game's own `TookHit`), `fns <actor>` (list its Blueprint functions), `clearpath <actor> [cm]`
+(turn off collision of nearby enemies, test setup only), `passthrough <actor> [cm] [up]` (can the player walk through
+it, both ways, with collision), `sweep x y z`, `call <function>` on the player, `kd <line>` (the mod's dev command file).
 
 `eval`: `world`, `title`, `loading`, `inworld`, `health`.
 
-## Results so far (2026-11-17, Steam build 26663759, Knights' Domain 1.0.3 dev build)
+## Results: Lane 1 (2026-11-18, Steam build 26663759, Knights' Domain 1.0.3 dev build)
 
-Each row ran twice from a fresh boot with the same result. "Gap" means the scenario shows something that is not shared.
+`--suite lane1`, two complete runs from empty saves, identical results: 2 pass, 10 fail, 0 skip. A scenario passes when
+the co-op behaviour is right, so FAIL means the thing is not shared.
 
 | Scenario | Result | Measured |
 |---|---|---|
 | movement | PASS | B moved 8 m, A's model of B ended 0 cm away (horizontal) |
-| loot_and_world | FAIL (gap) | A picked up `JarHammer_Pickup_2`: A inventory +1 and A's save marked it taken; on B the pickup is still there and B's save has no entry for it |
-| client_loot | FAIL (gap) | B picked up `Herb_Item_BP_2` (B +1 HealingHerb, B's save marks it taken); A's copy of the pickup is unchanged |
-| host_world_objects | FAIL (gap) | A opened `Chest10_2` and pulled `AquaLever_23`: both changed state on A only (live state and save 1 on A, unset on B). `SecretWall7_2` did not react to a plain interact |
-| client_world_objects | FAIL (gap) | B opened `SecretWall11_2`: changed on B only. `Chest3_2` did not open (probably locked) |
-| checkpoint | FAIL (gap) | A rested at `Checkpoint17`: A's save got `lastCheckpoint` and `savePointsVisited` = `GR_Camp_Save`; B's save unchanged |
-| rejoin | FAIL (gap) | B left and joined again after A opened `Chest10_2`: the rejoined B loads its own new world with the chest closed. Old teammate model removed and a new one spawned correctly |
+| loot_and_world | FAIL | A picked up `JarHammer_Pickup_2`: A inventory +1, A's save marks it taken; on B it is still there, no save entry |
+| client_loot | FAIL | B picked up `Herb_Item_BP_2`: B +1 HealingHerb, B's save marks it taken; A's copy unchanged |
+| host_world_objects | FAIL | A used 7 objects, all changed on A only (table below) |
+| client_world_objects | FAIL | B used 6 other objects of the same kinds, all changed on B only |
+| host_gate | FAIL | A pulled `AquaLever_23`: 5 s later A walks through `AquaGate_01_BP10` both ways; B is still blocked by the gate both ways |
+| client_gate | FAIL | B pulled the same lever on a fresh pair: B walks through after 5 s, A is still blocked |
+| checkpoint | FAIL | A rested at `Checkpoint17`: A's save got `lastCheckpoint` and `savePointsVisited` = `GR_Camp_Save`; B's unchanged |
+| client_checkpoint | FAIL | B rested there: the same, the other way round |
+| story_flags | FAIL | after A's actions, 8 story counters are set on A and missing on B (`TotalChestsOpened`, `TotalSecretDoorsOpened`, `BrokeBarricade`, `TotalBrokenPermaBreakables`, `CheckpointUnlockCount`, `TotalAchievementWeapons`, `WindGemsAcquired`, `FullEnergyCellsCount`); A's save has 14 world entries, B's 6, 8 differ |
+| rejoin | FAIL | B left and joined again after A opened `Chest10_2`: the rejoined B has its own new world with the chest closed. The old teammate model was removed and a new one spawned correctly (A sees exactly 1) |
+| client_progress_persists | PASS | B picked up `Herb_Item_BP3_5`, rested, quit and loaded its slot alone: HealingHerb 2, checkpoint `GR_Camp_Save` and the taken pickup all kept |
 
-In short, version 1.0.3 shares players and enemies, but no world object, pickup, checkpoint or save state, in either
-direction. Every player plays in their own world. The `WorldFlags` and `InteractRequest` messages in its protocol are
-defined but never sent.
+World objects, each used by one player (state = the object's own save data, live and in the save):
+
+| Kind | Used by A | Used by B | How | On the user | On the other player |
+|---|---|---|---|---|---|
+| Chest | `Chest10_2` | `Chest7_2` | interact | 1 | unset |
+| Secret wall | `SecretWall7_2` | `SecretWall11_2` | interact from its front | 1 | unset |
+| Door | `M_DoorSmall_00_BP2` | `M_DoorSmall_00_BP` | interact | 1 | unset |
+| Keyed door | `EggDoor_BP6` | `EggDoor_BP5` | insert key | 1 | unset |
+| Lift | `IntroDungerLift_BP_2` | `IntroDungerLift_BP2_2` | activate | 1, 1 | unset |
+| Barrel (breakable) | `Barrel27_2` | `Barrel37_2` | break | 1 | unset |
+| Barricade | `BreakableBarricade2_3` | | final hit | 1 | unset |
+| Lever and gate | `AquaLever_23` | `AquaLever_23` (fresh pair) | interact | lever 1, gate opens | lever unset, gate shut (walk test) |
+
+In short, version 1.0.3 shares players and enemies, but no world object, pickup, checkpoint, story flag or save state,
+in either direction, and a rejoining player gets a fresh world. Each player's own progress does save and reload
+correctly. The `WorldFlags` and `InteractRequest` messages in its protocol are defined but never sent.
+
+Not covered: `Chest3_2` stays shut with interact, `InsertKey` and `Open` (it needs its real key item); the keyed doors
+cover the key mechanism. `ActivationTrigger_C` volumes save nothing when entered (they are not one-time triggers).
+Quest state is covered by `story_flags`; no quest manager changed in these runs.
 
 ## Gotchas
 
@@ -99,6 +131,10 @@ defined but never sent.
 - If `CMAKE_TOOLCHAIN_FILE` is set in your environment (an Android NDK install sets it), CMake configures fail; `setup.py` drops it for its own builds.
 - The bridge pumps inside `ProcessEvent` of a few native vtables (UUserWidget, AFS_PlayerCharacter,
   APlayerController), the same context the title-screen buttons run in.
+- A new game in a used save slot keeps parts of the old world, so `rig.py` deletes the copy's own `SaveGames` before
+  every new-game boot (never for a load). Without that, results leak from one run into the next.
+- Doors and gates finish opening a few seconds after the lever, and only while their part of the level is streamed
+  in. The gate checks run first in each group, before the long-range teleports of the object checks.
 
 ## Next scenarios
 

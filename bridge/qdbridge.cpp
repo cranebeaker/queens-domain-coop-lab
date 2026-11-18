@@ -17,6 +17,7 @@
 #include "SDK/SavableActor_classes.hpp"
 #include "SDK/SavableActorState_structs.hpp"
 #include "SDK/Checkpoint_classes.hpp"
+#include "SDK/BreakableBarricade_classes.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -252,14 +253,19 @@ double Dist(const SDK::FVector& a, const SDK::FVector& b) {
     return std::sqrt((a.X - b.X) * (a.X - b.X) + (a.Y - b.Y) * (a.Y - b.Y) + (a.Z - b.Z) * (a.Z - b.Z));
 }
 
+// Actor names repeat across sublevels (each sublevel numbers its own actors), so a name means the loaded actor of
+// that name nearest to the local player.
 SDK::AActor* ActorByName(const std::string& name) {
-    auto& objs = SDK::UObject::GObjects;
-    for (int i = 0; i < objs->Num(); ++i) {
-        SDK::UObject* o = objs->GetByIndex(i);
-        if (o && !o->IsDefaultObject() && o->IsA(SDK::AActor::StaticClass()) && o->GetName() == name)
-            return static_cast<SDK::AActor*>(o);
+    SDK::AFS_PlayerChar_C* me = Player();
+    const SDK::FVector at = me ? me->K2_GetActorLocation() : SDK::FVector{};
+    SDK::AActor* best = nullptr;
+    double bestD = 1e30;
+    for (SDK::AActor* a : WorldActors(SDK::AActor::StaticClass())) {
+        if (a->GetName() != name) continue;
+        const double d = Dist(a->K2_GetActorLocation(), at);
+        if (d < bestD) { bestD = d; best = a; }
     }
-    return nullptr;
+    return best;
 }
 
 // Every player character in the world: the local one and the co-op mod's puppets of remote players.
@@ -427,6 +433,108 @@ public:
             Need(CallWith(a, "Interact", ip), "Interact");
             return {true, "interacted with " + name};
         }
+        if (cmd == "fns") {   // fns <actor>: Blueprint functions on the actor's class chain (down to AActor)
+            std::string name; in >> name;
+            SDK::AActor* a = ActorByName(name);
+            if (!a) throw cb::Error(cb::errc::kInvalidParams, "no actor " + name);
+            std::string out;
+            for (SDK::UStruct* s = a->Class; s && s != SDK::AActor::StaticClass(); s = s->SuperStruct) {
+                out += "[" + s->GetName() + "]";
+                for (SDK::UField* f = s->Children; f; f = f->Next)
+                    if (f->IsA(SDK::UFunction::StaticClass())) out += " " + f->GetName() + ";";
+                out += "\n";
+            }
+            return {true, out};
+        }
+        if (cmd == "callon") {   // callon <actor> <function with no params>
+            std::string name, fn; in >> name;
+            std::getline(in, fn);
+            if (!fn.empty() && fn[0] == ' ') fn.erase(0, 1);
+            SDK::AActor* a = ActorByName(name);
+            if (!a) throw cb::Error(cb::errc::kInvalidParams, "no actor " + name);
+            Need(CallNoParams(a, fn), fn);
+            return {true, "called " + fn + " on " + name};
+        }
+        if (cmd == "activate" || cmd == "deactivate") {   // Activate(ByLoad=false, ActorThatTriggered=local player)
+            std::string name; in >> name;
+            SDK::AActor* a = ActorByName(name);
+            auto* p = Player();
+            if (!a || !p) throw cb::Error(cb::errc::kInvalidParams, "no actor " + name + " or no player");
+            struct { bool byLoad; uint8_t pad[7]; SDK::AActor* by; } prm{false, {}, p};
+            const std::string fn = cmd == "activate" ? "Activate" : "Deactivate";
+            Need(CallWith(a, fn, prm), fn);
+            return {true, fn + " " + name};
+        }
+        if (cmd == "sweep") {   // sweep x y z: move the player with collision; reports where it stopped and what it hit
+            float x = 0, y = 0, z = 0; in >> x >> y >> z;
+            auto* p = Player();
+            if (!p) throw cb::Error(cb::errc::kInvalidParams, "no player");
+            SDK::FHitResult hit{};
+            p->K2_SetActorLocation(SDK::FVector{x, y, z}, true, &hit, false);
+            const SDK::FVector at = p->K2_GetActorLocation();
+            SDK::AActor* by = hit.Actor.Get();
+            char b[256];
+            std::snprintf(b, sizeof b, "{\"pos\":[%.0f,%.0f,%.0f],\"blocked\":%s,\"by\":\"%s\"}", at.X, at.Y, at.Z,
+                          hit.bBlockingHit ? "true" : "false", by ? by->GetName().c_str() : "");
+            return {true, b};
+        }
+        if (cmd == "tpside") {   // tpside <actor> <cm along its forward axis, negative = behind> [up]: stand there, facing it
+            std::string name; float d = 150, up = 60; in >> name >> d >> up;
+            SDK::AActor* a = ActorByName(name);
+            auto* p = Player();
+            if (!a || !p) throw cb::Error(cb::errc::kInvalidParams, "no actor " + name + " or no player");
+            const SDK::FVector c = a->K2_GetActorLocation();
+            const SDK::FVector f = a->GetActorForwardVector();
+            p->K2_SetActorLocation(SDK::FVector{c.X + f.X * d, c.Y + f.Y * d, c.Z + up}, false, nullptr, true);
+            if (auto* pc = SDK::UGameplayStatics::GetPlayerController(World(), 0)) {
+                SDK::FRotator r{}; r.Yaw = std::atan2(-f.Y * d, -f.X * d) * 180.f / 3.14159265f; pc->SetControlRotation(r);
+            }
+            return {true, "ok"};
+        }
+        if (cmd == "breakhp") {   // breakhp <barricade>: HP to 0, then the game's own TookHit (what a final blow runs)
+            std::string name; in >> name;
+            SDK::AActor* a = ActorByName(name);
+            SDK::UClass* cls = SDK::UObject::FindClassFast("BreakableBarricade_C");
+            if (!a || !cls || !a->IsA(cls)) throw cb::Error(cb::errc::kInvalidParams, "no barricade " + name);
+            static_cast<SDK::ABreakableBarricade_C*>(a)->HP = 0;
+            Need(CallNoParams(a, "TookHit"), "TookHit");
+            return {true, "broke " + name};
+        }
+        if (cmd == "clearpath") {   // clearpath <actor> [cm]: turn off collision of enemies near it (test setup only)
+            std::string name; float r = 1500; in >> name >> r;
+            SDK::AActor* a = ActorByName(name);
+            if (!a) throw cb::Error(cb::errc::kInvalidParams, "no actor " + name);
+            const SDK::FVector c = a->K2_GetActorLocation();
+            int n = 0;
+            for (SDK::AActor* e : WorldActors(SDK::AFS_EnemyCharacterBase::StaticClass()))
+                if (Dist(e->K2_GetActorLocation(), c) <= r) { e->SetActorEnableCollision(false); ++n; }
+            return {true, "collision off on " + std::to_string(n) + " enemies"};
+        }
+        if (cmd == "passthrough") {   // passthrough <actor> [cm] [up]: can the player walk through it along its forward axis?
+            std::string name; float d = 250, up = 100; in >> name >> d >> up;
+            SDK::AActor* a = ActorByName(name);
+            auto* p = Player();
+            if (!a || !p) throw cb::Error(cb::errc::kInvalidParams, "no actor " + name + " or no player");
+            const SDK::FVector c = a->K2_GetActorLocation();
+            const SDK::FVector f = a->GetActorForwardVector();
+            const SDK::FVector from{c.X - f.X * d, c.Y - f.Y * d, c.Z + up};
+            const SDK::FVector to{c.X + f.X * d, c.Y + f.Y * d, c.Z + up};
+            auto tryPass = [&](const SDK::FVector& s, const SDK::FVector& e) {
+                p->K2_SetActorLocation(s, false, nullptr, true);
+                SDK::FHitResult hit{};
+                p->K2_SetActorLocation(e, true, &hit, false);
+                const SDK::FVector at = p->K2_GetActorLocation();
+                const double left = Dist(at, e);
+                SDK::AActor* by = hit.Actor.Get();
+                char b[200];
+                std::snprintf(b, sizeof b, "{\"passed\":%s,\"leftCm\":%.0f,\"by\":\"%s\"}", left < 30 ? "true" : "false",
+                              left, by ? by->GetName().c_str() : "");
+                return std::string(b);
+            };
+            // both directions: a wall right behind the start point on one side must not fake a block
+            const std::string fwd = tryPass(from, to), back = tryPass(to, from);
+            return {true, "{\"forward\":" + fwd + ",\"backward\":" + back + "}"};
+        }
         if (cmd == "call") {
             std::string fn; in >> fn;
             auto* p = Player();
@@ -468,6 +576,7 @@ public:
         if (want("pickups")) v.set("pickups", PickupsState(6000));
         if (want("puppets")) v.set("puppets", PuppetsState());
         if (want("savables")) v.set("savables", SavablesState(6000, false));
+        if (!sections.empty() && want("savables_all")) v.set("savables_all", SavablesState(0, false));
         if (want("checkpoints")) v.set("checkpoints", CheckpointsState());
         return v;
     }

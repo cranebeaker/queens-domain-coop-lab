@@ -59,7 +59,13 @@ def mod_args(name, role):
     return args
 
 
-def boot(name, role=None, slot=0):
+def boot(name, role=None, slot=0, load=False):
+    if not load:
+        # a new game in a used slot keeps parts of the old world: start every test from an empty save folder
+        # (the copy's own Saved, never the owner's)
+        saves = os.path.join(qdlab.COPIES, name, "QueensDomain", "Saved", "SaveGames")
+        if os.path.isdir(saves):
+            shutil.rmtree(saves)
     pid = qdlab.launch(name, mod_args(name, role))
     log(f"{name}: launched pid {pid}")
     time.sleep(8)
@@ -69,8 +75,8 @@ def boot(name, role=None, slot=0):
     g = connect(name)
     wait_until(lambda: g.eval("title") is True, 120, what=f"{name} title screen")
     time.sleep(4)   # the title screen must settle before a new game (see games/queens-domain NOTES in the hub)
-    g.exec(f"newgame {slot}")
-    log(f"{name}: new game in slot {slot}")
+    g.exec(f"{'loadslot' if load else 'newgame'} {slot}")
+    log(f"{name}: {'loaded' if load else 'new game in'} slot {slot}")
     g.close()
     g = connect(name, wait_s=120)
     wait_until(lambda: g.eval("inworld") is True, 240, step=2, what=f"{name} in world")
