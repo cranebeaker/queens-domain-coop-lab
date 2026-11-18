@@ -93,6 +93,7 @@ Each row ran twice from a fresh boot with the same result. "Gap" means the scena
 | ranged_attacks | FAIL (gap) | Two `Mossy_Archer_BP_C` shoot at A (10 m away) for 30 s, B in god mode stands on the line halfway (0 cm off it). Both copies play `Boner_Bow_Attack` on the archers (owner P1), but the arrows (`Mossy_Arrow_Projectile_C`) exist only on A: A saw 12 / 11 arrows and took 11 / 11 hits; B saw 0 arrows and took 0 hits |
 | area_attacks | FAIL (gap) | The Ruins dragon boss (`Dragon_Green_BP_C`) fights A for 75 s, B in god mode kept a median 1.5 m from A. Both copies play the same boss montages (fire breath, air fireballs), but fire puddles (`Dragon_FirePuddle_C`), fireballs (`Dragon_Fireball_C`) and flame-breath projectiles exist only on A: A saw 59 + 0 + 48 / 16 + 9 + 16 of them and took 16 + 0 + 91 / 22 + 17 + 32 hits from them; B saw none and took 0 hits |
 | drops_and_xp | FAIL (gap) | A kills 10 small enemies near (3000, -2000) with `kd ehit` (4000 damage), B 1.5 m behind A. XP and `killedEnemyCounts` agree on both copies in most runs (432 / 432), but B missed one of A's kills in 3 of 12 runs (70 kills in all; run 1 here: 432 vs 422 XP). Loot is rolled on each copy: what drops differs (run 2: A got a coin, two herbs and a poison cure, B one coin), each player picks up their own copy, and nothing of it exists on the other copy |
+| enemy_hp_agree | FAIL (gap, intermittent) | A and B take turns hitting a `Mossy_Fighter_BP_C` (67.2 HP) for 3 until it dies. HP agrees on both copies after every hit (worst gap 0.0) and it dies on both at the same hit. But some of A's hits do nothing: run 1 took 23 hits with none lost, run 2 took 27, and A's hits 3, 5, 7 and 9 changed nothing on either copy. Ownership moves to the last hitter, so it flips between the players on every hit. Each lost hit was relayed to B about 3 ms before ownership flipped back to A |
 
 In short, version 1.0.3 shares players and enemies, but no world object, pickup, checkpoint or save state, in either
 direction. Every player plays in their own world. The `WorldFlags` and `InteractRequest` messages in its protocol are
@@ -115,4 +116,4 @@ defined but never sent.
 
 ## Next scenarios
 
-See [TASKS.md](TASKS.md). Lane 1 (world, loot, saves) is measured above; Lane 2 (combat, death, network) is in progress: `ranged_attacks`, `area_attacks` and `drops_and_xp` are measured above.
+See [TASKS.md](TASKS.md). Lane 1 (world, loot, saves) is measured above; Lane 2 (combat, death, network) is in progress: `ranged_attacks`, `area_attacks`, `drops_and_xp` and `enemy_hp_agree` are measured above.

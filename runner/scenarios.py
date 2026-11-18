@@ -526,10 +526,88 @@ def drops_and_xp(a, b, spot=(3000, -2000, 500), kills=10):
     return drops_once, res
 
 
+def enemy_by_name(g, name):
+    return next((e for e in g.state(sections=["enemies"])["enemies"] if e["name"] == name), None)
+
+
+def kd_log_since(name, from_line, word):
+    return [l.rstrip() for l in kd_log_all(name)[from_line:] if word in l]
+
+
+def enemy_hp_agree(a, b, enemy_class="Mossy_Fighter", spot=(3000, -2000, 500), dmg=3, settle=1.2):
+    """A and B take turns hitting the same enemy (`kd ehit`, 3 damage) until it dies. Shared enemy health: after
+    every hit both copies show the same HP, every hit lowers it, and the enemy dies on both at the same hit. The hits
+    on the side that does not own the enemy are relayed to the owner, so this covers both directions (and the mod's
+    last-hitter ownership moves the enemy between the players during the fight)."""
+    for g in (a, b):
+        g.exec("kd god 1")
+    a.exec(f"tp {spot[0]} {spot[1]} {spot[2]} 0")
+    time.sleep(3)
+    pa = local_pos(a)
+    cands = sorted((e for e in enemies(a) if enemy_class in e["class"] and e.get("hp")),
+                   key=lambda e: dist(e["pos"], pa))
+    if not cands:
+        return None, {"why": f"no live {enemy_class} within 60 m of A"}
+    en = cands[0]
+    a.exec(f"kd egoto {en['name']} 250")
+    time.sleep(1.5)
+    pa = local_pos(a)
+    b.exec(f"tp {pa[0]} {pa[1]} {pa[2] + 50} 0")
+    time.sleep(4)
+    en = enemy_by_name(a, en["name"])
+    twin = match_enemy(b, en, 400)
+    if twin is None:
+        return None, {"why": "B has no copy of the enemy within 4 m of where A sees it", "enemy": en}
+    log_from = {n: len(kd_log_all(n)) for n in ("A", "B")}
+    rows, worst = [], 0.0
+    hp_start = [round(en["hp"], 1), round(twin["hp"], 1)]
+    for i in range(60):
+        hitter, name, g = (("A", en["name"], a) if i % 2 == 0 else ("B", twin["name"], b))
+        g.exec(f"kd ehit {name} {dmg}")
+        time.sleep(settle)
+        ea, eb = enemy_by_name(a, en["name"]), enemy_by_name(b, twin["name"])
+        ha = None if ea is None else (0.0 if ea["dead"] else round(ea["hp"], 1))
+        hb = None if eb is None else (0.0 if eb["dead"] else round(eb["hp"], 1))
+        dead = [ea is None or ea["dead"], eb is None or eb["dead"]]
+        if ha is not None and hb is not None:
+            worst = max(worst, abs(ha - hb))
+        rows.append({"hit": i + 1, "by": hitter, "hp": [ha, hb], "dead": dead})
+        if all(dead):
+            break
+        if any(dead):   # one side says dead: give the other a few seconds to follow
+            time.sleep(4)
+            eb2, ea2 = enemy_by_name(b, twin["name"]), enemy_by_name(a, en["name"])
+            rows.append({"after_4s": True, "dead": [ea2 is None or ea2["dead"], eb2 is None or eb2["dead"]]})
+            break
+    for g in (a, b):
+        g.exec("kd god 0")
+    owners = {n: [l.split("] ", 2)[-1] for l in kd_log_since(n, log_from[n], "[edbg] hit")][:4] for n in ("A", "B")}
+    rejected = {n: len(kd_log_since(n, log_from[n], "damage request rejected")) for n in ("A", "B")}
+    final = rows[-1]["dead"]
+    hit_rows = [r for r in rows if "hit" in r]
+    prev, lost = hp_start[0], []
+    for r in hit_rows:   # a hit that left the enemy alive at the same HP on the owner side did nothing
+        h = r["hp"][0]
+        if h is not None and not r["dead"][0] and prev is not None and h >= prev:
+            lost.append({"hit": r["hit"], "by": r["by"]})
+        prev = h
+    first_dead = {s: next((r["hit"] for r in rows if "hit" in r and r["dead"][k]), None)
+                  for k, s in enumerate(("A", "B"))}
+    res = {"enemy": en["class"], "hp_start": hp_start, "damage_per_hit": dmg, "hits": len([r for r in rows if "hit" in r]),
+           "worst_hp_gap": round(worst, 1), "hits_that_did_nothing": lost, "died_at_hit": first_dead, "dead_at_end": final,
+           "first_hit_log": owners, "rejected_requests": rejected, "trace": rows}
+    if not any(final):
+        return None, {"why": "the enemy did not die within 60 hits", **res}
+    res["checks"] = {"hp_agrees": worst <= 1.0, "dies_on_both_at_same_hit": all(final) and
+                     first_dead["A"] == first_dead["B"], "every_hit_counts": not lost}
+    return all(res["checks"].values()), res
+
+
 SCENARIOS = {"movement": movement, "loot_and_world": loot_and_world, "client_loot": client_loot,
              "host_world_objects": host_world_objects, "client_world_objects": client_world_objects,
              "checkpoint": checkpoint, "rejoin": rejoin, "ranged_attacks": ranged_attacks,
-             "area_attacks": area_attacks, "drops_and_xp": drops_and_xp}
+             "area_attacks": area_attacks, "drops_and_xp": drops_and_xp,
+             "enemy_hp_agree": enemy_hp_agree}
 
 
 def main(names):
