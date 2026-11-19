@@ -1050,18 +1050,20 @@ def boss_of(g, cls):
     found = [e for e in g.state(sections=["enemies"])["enemies"] if cls in e["class"]]
     if not found:
         return None
-    e = sorted(found, key=lambda x: (x["dead"], x["dist"]))[0]
+    for e in found:   # a dormant copy elsewhere (the Bridge Lord's decoy) is not the boss being fought
+        e["trap"] = getvar(g, e["name"], "InTrapMode") == "true"
+    e = sorted(found, key=lambda x: (x["trap"], x["dead"], x["dist"]))[0]
     e["suspended"] = getvar(g, e["name"], "DeathIsSuspended") == "true"
-    e["trap"] = getvar(g, e["name"], "InTrapMode") == "true"
     return e
 
 
 def door_open(g, name):
-    """A gate with a blocker box (Sword Shrine gates) is open when the box has no collision; other Door_Base doors
-    report Opened; other arena walls (the Necronomicon's) are open when hidden or without collision."""
-    box = getvar(g, name, "ClosedBox.collision")
-    if box is not None:
-        return box == "none"
+    """A gate with a blocker box (Sword Shrine gates, the Jigeki door) is open when the box has no collision; other
+    Door_Base doors report Opened; other arena walls (the Necronomicon's) are open when hidden or without collision."""
+    for comp in ("ClosedBox", "BlockerBox"):   # Sword Shrine gates; doors that block with a box (the Jigeki door)
+        box = getvar(g, name, f"{comp}.collision")
+        if box is not None:
+            return box == "none"
     v = getvar(g, name, "Opened")
     if v in ("true", "false"):
         return v == "true"
@@ -1080,7 +1082,7 @@ def ensure_boss(a, b, cls, spawner, wait_s=20):
     """The boss exists on both copies; a spawner that has not spawned it yet (quest conditions, distance) is told to
     on the host, which decides spawns for everyone."""
     def here(g):   # hidden too: some bosses stay hidden until their intro (the Whaleking)
-        return any(cls in x["class"] for x in actors(g, cls))
+        return any(cls in x["class"] and "Spawner" not in x["class"] for x in actors(g, cls))
     if not here(a):
         a.exec(f"callon {spawner} Force Respawn")
     end = time.time() + wait_s
@@ -1091,17 +1093,25 @@ def ensure_boss(a, b, cls, spawner, wait_s=20):
     return False
 
 
-def fight_half(g, other, cls, seconds):
-    """`g` fights the boss for `seconds` (its hits make it the boss's target); both players' health dents counted."""
+def fight_half(g, other, cls, seconds, goto_cm=250):
+    """`g` fights the boss for `seconds`, or up to twice as long until it has been hit (its hits make it the boss's
+    target, the other player stands 20 m back); both players' health dents counted."""
     for x in (g, other):
         x.exec("watch start 3000 Zzz")
-    end = time.time() + seconds
+    # each machine aims at its own copy by name (names differ per machine; a class can match a decoy too)
+    tg, to = ((boss_of(x, cls) or {}).get("name", cls) for x in (g, other))
+    start = time.time()
+    end, hard_end = start + seconds, start + 2 * seconds
     next_goto = 0.0
-    while time.time() < end:
+    while time.time() < hard_end:
+        # past `seconds`, keep going only until `g` has been hit (a slow attack cycle can miss a fixed window)
+        if time.time() >= end and g.state(sections=["watch"])["watch"]["health"]["drops"] > 0:
+            break
         if time.time() >= next_goto:
-            g.exec(f"kd egoto {cls} 250")
+            g.exec(f"kd egoto {tg} {goto_cm}")
+            other.exec(f"kd egoto {to} 2000")   # the other player stands back, so the boss turns to `g`
             next_goto = time.time() + 6
-        g.exec(f"kd ehit {cls} 1")
+        g.exec(f"kd ehit {tg} 1")
         time.sleep(2.5)
     out = []
     for x in (g, other):
@@ -1111,20 +1121,36 @@ def fight_half(g, other, cls, seconds):
     return out
 
 
-def fight(a, b, cls, seconds=60):
-    """Half the time the boss fights B (its attacks reach B through the mirrored hitboxes), half the time A."""
-    hb = fight_half(b, a, cls, seconds / 2)
-    ha = fight_half(a, b, cls, seconds / 2)
+def fight(a, b, cls, seconds=60, goto_cm=250, host_first=False):
+    """Half the time the boss fights B (its attacks reach B through the mirrored hitboxes), half the time A. Each
+    stands `goto_cm` from the boss (farther for a boss in a pool that throws the player out)."""
+    if host_first:
+        ha = fight_half(a, b, cls, seconds / 2, goto_cm)
+        hb = fight_half(b, a, cls, seconds / 2, goto_cm)
+    else:
+        hb = fight_half(b, a, cls, seconds / 2, goto_cm)
+        ha = fight_half(a, b, cls, seconds / 2, goto_cm)
     return {"b_fights": {"b": hb[0], "a": hb[1]}, "a_fights": {"a": ha[0], "b": ha[1]}}
+
+
+def boss_far(g, cls):
+    """The name of this copy's boss of class `cls` wherever it is (the enemy list only covers 60 m around the player):
+    a copy not in its dormant trap mode first."""
+    found = [x["name"] for x in actors(g, cls) if cls in x["class"] and "Spawner" not in x["class"]]
+    found.sort(key=lambda n: getvar(g, n, "InTrapMode") == "true")
+    return found[0] if found else None
 
 
 def kill(a, cls, tries=60, dmg=4000):
     """The host (the boss's owner) hits it until it is dead or kneels (bosses with a talk-to-loot death)."""
+    if not boss_of(a, cls) and boss_far(a, cls):   # it moved away (the Bridge Lord leaps down into its arena)
+        a.exec(f"kd egoto {boss_far(a, cls)} 400")
+        time.sleep(2)
     for i in range(tries):
         bs = boss_of(a, cls)
         if not bs or bs["dead"] or bs["suspended"]:
             return i
-        a.exec(f"kd ehit {cls} {dmg}")
+        a.exec(f"kd ehit {bs['name']} {dmg}")
         time.sleep(1.5)
     return tries
 
@@ -1133,8 +1159,21 @@ def talk_reward(g, boss_name, presses=25, boss_end=None):
     """The local player talks to its own copy of a defeated boss and clicks through the reward dialogue; then the
     dialogue's own end runs (what leaving the conversation does), which is when the boss really dies."""
     inv0 = dict(save(g).get("inventory") or {})
+    held0 = {x["name"] for x in actors(g, "Pickup", 6000)}
+    carried = getvar(g, boss_name, "HeldItem")   # an item the boss holds (a Josami knight's key)
     g.exec(f"interact {boss_name}")
     time.sleep(3)
+    # loot handed over as an item the player holds up (the Blood Lords' amulets, a knight's key): the player puts it
+    # away with a button, which ends the pickup and lets the boss die for good
+    new = [x["name"] for x in actors(g, "Pickup", 6000) if x["name"] not in held0]
+    if carried and carried != "None":
+        new.append(carried)
+    for name in new:
+        try:
+            g.exec(f"callon {name} PutAway")
+            time.sleep(2)
+        except Exception:
+            pass
     for _ in range(presses):
         try:
             g.exec("uicall DialogueScreen ConfirmPressed")
@@ -1162,12 +1201,58 @@ def both(fn, a, b):
     return {"a": fn(a), "b": fn(b)}
 
 
-def boss_scenario_start(a, b, spot_a, spot_b):
+def placed(g, probe):
+    """Some loaded actor named or classed `probe` has a real position (its sublevel is streamed in)."""
+    return any(x["pos"] != [0, 0, 0] for x in actors(g, probe) if probe in x["name"] or probe in x["class"])
+
+
+def stands_at(g, spot):
+    """Put the player at `spot`: True if they stand there (the floor is loaded; it may be a little below the spot),
+    not fall through it."""
+    g.exec("tp {} {} {} 0".format(*spot))
+    time.sleep(2.5)
+    p1 = local_pos(g)
+    time.sleep(1)
+    p2 = local_pos(g)
+    flat = ((p1[0] - spot[0]) ** 2 + (p1[1] - spot[1]) ** 2) ** 0.5
+    return flat < 400 and abs(p2[2] - p1[2]) < 30 and spot[2] - 1200 < p1[2] < spot[2] + 300
+
+
+def stream_in(g, levels, probe, spot, wait_s=20):
+    """A teleport skips the game's level loading (walking through a LevelManagerTrigger, a teleporter's priority load):
+    an arena in a sublevel can stay streamed out, its actors at the origin or its floor missing under the player.
+    `levels` is the area's level list, which the game's level manager loads (bridge `levellist`), or "loc:<name>", a
+    teleporter or rest spot the player teleports to first the game's own way (bridge `tploc`: some areas only get
+    their floors that way), or "call:<player function>" for the player's own teleport there. Then the player is put at `spot`. True once `probe` is placed and the player stands there."""
+    if levels.startswith("loc:"):
+        g.exec(f"tploc {levels[4:]}")
+        time.sleep(12)
+    elif levels.startswith("call:"):   # the player's own teleport to a place without a rest spot (Sipeha's world)
+        g.exec(f"call {levels[5:]}")
+        time.sleep(12)
+    else:
+        g.exec(f"levellist {levels}")
+    end = time.time() + wait_s
+    while time.time() < end:
+        if (not probe or placed(g, probe)) and stands_at(g, spot):
+            return True
+        time.sleep(1)
+    return False
+
+
+def boss_scenario_start(a, b, spot_a, spot_b, levels=None, probe=None):
+    """Both players in god mode at their spots; with `levels`, the area's level list is loaded first on each machine.
+    False if a player could not be put there (the area did not load)."""
     for g in (a, b):
         g.exec("kd god 1")
+    if levels:
+        ok = all([stream_in(g, levels, probe, spot) for g, spot in ((a, spot_a), (b, spot_b))])
+        time.sleep(2)
+        return ok
     a.exec("tp {} {} {} 0".format(*spot_a))
     b.exec("tp {} {} {} 0".format(*spot_b))
     time.sleep(8)
+    return True
 
 
 def boss_scenario_end(a, b):
@@ -1366,7 +1451,8 @@ def whaleking(a, b):
     of the host's copy runs on the client's; it lies defeated on both, each player gets the reward from their own copy
     and both saves have WhaleKingIsDead."""
     cls, spawner = "Whaleking_Boss_BP", "WhaleKingSpawner"
-    boss_scenario_start(a, b, (-2470, -9502, -4200), (-2300, -9502, -4200))
+    if not boss_scenario_start(a, b, (-2470, -9502, -4200), (-2300, -9502, -4200), "AquaRuins", spawner):
+        return None, {"why": "the Whaleking's lake did not load"}
     if not ensure_boss(a, b, cls, spawner):
         return None, {"why": "the Whaleking is not on both copies"}
     res, checks = {}, {}
@@ -1400,7 +1486,8 @@ def king_of_stone(a, b):
     give up (it did, for everyone). It lies defeated on both, each player gets the reward from their own copy and both
     saves have SZWhaleKingIsDead."""
     cls, spawner = "Whaleking_SZ_BP", "WhaleKing_SZ_Spawner_2"
-    boss_scenario_start(a, b, (16374, -28000, -13850), (16200, -28000, -13850))
+    if not boss_scenario_start(a, b, (16374, -28000, -13850), (16200, -28000, -13850), "StoneGarden", spawner):
+        return None, {"why": "the Stone Garden did not load"}
     if not ensure_boss(a, b, cls, spawner):
         return None, {"why": "the King of Stone is not on both copies"}
     res, checks = {}, {}
@@ -1463,7 +1550,8 @@ def evil_fishwife(a, b):
     client's; she lies defeated on both, each player gets the reward from their own copy, both saves have
     EvilFishWifeDefeated and the door opens on both."""
     cls, spawner = "FishWifeEvil", "FishWifeEvil_Spawner"
-    boss_scenario_start(a, b, (-18881, -16900, -13250), (-18881, -17050, -13250))
+    if not boss_scenario_start(a, b, (-18881, -16900, -13250), (-18881, -17050, -13250), "AquaRuins", spawner):
+        return None, {"why": "the Jigeki temple did not load"}
     if not ensure_boss(a, b, cls, spawner):
         return None, {"why": "the Evil Fishwife is not on both copies"}
     res, checks = {}, {}
@@ -1495,8 +1583,13 @@ def white_tree_golem(a, b):
     """White Tree Golem (golden room under the Ruins). The CLIENT uses the big nut: the golem appears and wakes on both
     copies; its attacks hit each player it fights; it dies on both, both saves have WhiteTreeGolemDead and the big nut
     it leaves is there for both."""
-    cls, nut = "Golem_WhiteTree", "BigNut_SM_2"
-    boss_scenario_start(a, b, (12218, -700, -1450), (12218, -850, -1450))
+    cls, nut, spawner = "Golem_WhiteTree_BP", "BigNut_SM_2", "Golem_WhiteTree_Spawner_2"
+    if not boss_scenario_start(a, b, (12218, -700, -1450), (12218, -850, -1450), "GreenRuins", nut):
+        return None, {"why": "the golden room did not load"}
+    # the nut wakes the golem its spawner placed when the room was shown (the game's level manager, which a teleport
+    # skips): spawn it the way that does
+    if not ensure_boss(a, b, cls, spawner):
+        return None, {"why": "the White Tree Golem is not on both copies"}
     res, checks = {}, {}
     b.exec(f"interact {nut}")
     time.sleep(12)
@@ -1515,6 +1608,78 @@ def white_tree_golem(a, b):
     checks["killed_flag_both"] = all(x.get("WhiteTreeGolemDead") == 1 for x in res["saves"].values())
     res["nut_pickup"] = both(lambda g: [p["class"] for p in visible_pickups(g).values() if "Nut" in p["class"]], a, b)
     checks["nut_for_both"] = all(res["nut_pickup"].values())
+    boss_scenario_end(a, b)
+    res["checks"] = checks
+    return all(checks.values()), res
+
+
+def boss_encounter(a, b, cls, spawner, spot, start, levels, door_vars=(), doors=(), partners=(), flags=(),
+                   talk_counter=None, boss_end=None, fight_s=60, spawn_first=True, open_after=True, extra=None,
+                   partner_spawners=(), goto_cm=250, fight_cls=None):
+    """The shared shape of a boss fight check. Both players stand at `spot`; `start` = (who, bridge command) sets the
+    fight off on that player's machine; then on both copies: the boss (and its `partners`) exist and are awake, the
+    arena doors (spawner variables `door_vars`, or actor names `doors`) are shut, the boss's attacks hit each player it
+    fights, the boss and partners die (or kneel, then each player talks to their own copy for the reward counted in
+    `talk_counter`), the save `flags` are set and the doors are open again (`open_after`). `extra(a, b, res, checks)`
+    adds boss-specific checks before the kill."""
+    res, checks = {}, {}
+    if not boss_scenario_start(a, b, spot, (spot[0] + 150, spot[1], spot[2]), levels, spawner):
+        return None, {"why": f"{levels} did not load at the arena"}
+    # a boss whose spawner placed it when the area was shown (the game's level manager, which a teleport skips) is
+    # spawned the way that does; the fight's start then wakes it (and its partners)
+    if spawn_first and not ensure_boss(a, b, cls, spawner):
+        return None, {"why": f"{cls} is not on both copies"}
+    for c, sp in zip(partners, partner_spawners):
+        if not ensure_boss(a, b, c, sp):
+            return None, {"why": f"{c} is not on both copies"}
+    door_names = list(doors)
+    for v in door_vars:
+        d = getvar(a, spawner, v)
+        if d and d != "None":
+            door_names.append(d)
+    res["doors"] = door_names
+    who, cmd = start
+    for i, c in enumerate(cmd.split(" ; ")):   # several steps: each a few seconds after the last
+        if i:
+            time.sleep(5)
+        (b if who == "b" else a).exec(c)
+    time.sleep(10)
+    for c in (cls, *partners):
+        res[f"present_{c}"] = both(lambda g: len([x for x in actors(g, c) if c in x["class"] and "Spawner" not in x["class"]
+                                                   and x["pos"] != [0, 0, 0]]), a, b)
+        checks[f"{c}_on_both"] = res[f"present_{c}"]["a"] > 0 and res[f"present_{c}"]["b"] > 0
+    if not all(checks.values()):
+        boss_scenario_end(a, b)
+        res["checks"] = checks
+        return False, res
+    res["doors_in_fight"] = {d: both(lambda g: door_open(g, d), a, b) for d in door_names}
+    checks["arena_locked_both"] = all(v == {"a": False, "b": False} for v in res["doors_in_fight"].values())
+    res["fight"] = fight(a, b, fight_cls or cls, seconds=fight_s, goto_cm=goto_cm)   # the one that attacks
+    checks["attacks_hit_b"] = res["fight"]["b_fights"]["b"]["hits"] > 0
+    checks["attacks_hit_a"] = res["fight"]["a_fights"]["a"]["hits"] > 0
+    if extra:
+        extra(a, b, res, checks)
+    for c in partners:
+        res[f"kill_{c}"] = kill(a, c)
+    if talk_counter:
+        suspended_boss_end(a, b, cls, res, checks, talk_counter, boss_end=boss_end)
+    else:
+        res["kill_hits"] = kill(a, cls)
+        time.sleep(8)
+        for g in (a, b):   # each player walks over to their own copy (it may have fallen or leapt away)
+            x = boss_of(g, cls)
+            if (not x or x["trap"]) and boss_far(g, cls):
+                g.exec(f"kd egoto {boss_far(g, cls)} 300")
+        time.sleep(3)
+        res["after_kill"] = both(lambda g: boss_of(g, cls), a, b)
+        checks["dead_both"] = all(x is None or x["dead"] or x["suspended"] for x in res["after_kill"].values())
+    time.sleep(4)
+    res["saves"] = both(lambda g: named(g, *flags), a, b) if flags else {}
+    for f in flags:
+        checks[f"{f}_both"] = all((x.get(f) or 0) >= 1 for x in res["saves"].values())
+    if open_after and door_names:
+        res["doors_after"] = {d: both(lambda g: door_open(g, d), a, b) for d in door_names}
+        checks["arena_open_both"] = all(v == {"a": True, "b": True} for v in res["doors_after"].values())
     boss_scenario_end(a, b)
     res["checks"] = checks
     return all(checks.values()), res

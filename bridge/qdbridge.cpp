@@ -20,6 +20,7 @@
 #include "SDK/SavableActorState_structs.hpp"
 #include "SDK/Checkpoint_classes.hpp"
 #include "SDK/BreakableBarricade_classes.hpp"
+#include "SDK/QueensDomain_parameters.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -703,6 +704,79 @@ public:
             }
             return {true, "ok"};
         }
+        if (cmd == "levellist") {   // levellist <name>: the game's level manager loads that level list now, the way the
+                                    // player's own priority loads do (a teleport skips the triggers that load areas)
+            std::string name; in >> name;
+            SDK::UObject* list = nullptr;
+            auto& objs = SDK::UObject::GObjects;
+            for (int i = 0; i < objs->Num() && !list; ++i) {
+                SDK::UObject* o = objs->GetByIndex(i);
+                if (o && !o->IsDefaultObject() && o->Class && o->Class->GetName() == "FS_LevelList" && o->GetName() == name)
+                    list = o;
+            }
+            if (!list) throw cb::Error(cb::errc::kInvalidParams, "no level list " + name + " in memory");
+            SDK::UObject* cdo = SDK::AFS_LevelManager::GetDefaultObj();
+            SDK::UFunction* run = FindFn(cdo, "RunPriorityLoad");
+            SDK::UFunction* flush = FindFn(cdo, "FlushLevelManagerActions");
+            if (!run || !flush) throw cb::Error(cb::errc::kInvalidParams, "FS_LevelManager functions not found");
+            SDK::Params::FS_LevelManager_RunPriorityLoad rp{};
+            rp.WorldContextObject = World();
+            rp.List = static_cast<SDK::UFS_LevelList*>(list);
+            rp.bMoveToTriggerListAfterFinished = true;
+            SDK::Params::FS_LevelManager_FlushLevelManagerActions fp{};
+            fp.WorldContextObject = World();
+            fp.bBlocking = true;
+            for (auto [fn, parms] : {std::pair<SDK::UFunction*, void*>{run, &rp}, {flush, &fp}}) {
+                const auto flags = fn->FunctionFlags;
+                fn->FunctionFlags |= 0x400;
+                cdo->ProcessEvent(fn, parms);
+                fn->FunctionFlags = flags;
+            }
+            return {true, "loaded level list " + name};
+        }
+        if (cmd == "levels") {   // levels: the world's streaming levels, one per line: name, should load/show, loaded, shown
+            std::string out;
+            SDK::UWorld* w = World();
+            if (!w) throw cb::Error(cb::errc::kInvalidParams, "no world");
+            for (SDK::ULevelStreaming* ls : w->StreamingLevels) {
+                if (!ls) continue;
+                std::string name = ls->GetWorldAssetPackageFName().ToString();
+                if (auto slash = name.rfind('/'); slash != std::string::npos) name = name.substr(slash + 1);
+                out += name + (ls->bShouldBeLoaded ? " want-load" : "") + (ls->bShouldBeVisible ? " want-show" : "") +
+                       (ls->IsLevelLoaded() ? " loaded" : "") + (ls->IsLevelVisible() ? " shown" : "") + "\n";
+            }
+            return {true, out};
+        }
+        if (cmd == "objs") {   // objs <class name> [word]: names of live objects of that class or a subclass (data assets too)
+            std::string cls, word; in >> cls >> word;
+            std::string out;
+            auto& objs = SDK::UObject::GObjects;
+            for (int i = 0; i < objs->Num(); ++i) {
+                SDK::UObject* o = objs->GetByIndex(i);
+                if (!o || o->IsDefaultObject() || !o->Class) continue;
+                bool is = false;   // that class or a subclass
+                for (SDK::UStruct* c = o->Class; c && !is; c = c->SuperStruct) is = c->GetName() == cls;
+                if (!is) continue;
+                const std::string n = o->GetFullName();
+                if (word.empty() || n.find(word) != std::string::npos) out += n + "\n";
+            }
+            return {true, out};
+        }
+        if (cmd == "tploc") {   // tploc <FS_LocationData name>: the player's own TeleportToLocation (what a teleporter does)
+            std::string name; in >> name;
+            SDK::UObject* loc = nullptr;
+            auto& objs = SDK::UObject::GObjects;
+            for (int i = 0; i < objs->Num() && !loc; ++i) {
+                SDK::UObject* o = objs->GetByIndex(i);
+                if (o && !o->IsDefaultObject() && o->IsA(SDK::UFS_LocationData::StaticClass()) && o->GetName() == name)
+                    loc = o;
+            }
+            auto* p = Player();
+            if (!loc || !p) throw cb::Error(cb::errc::kInvalidParams, "no location " + name + " or no player");
+            struct { SDK::UObject* loc; bool greenFx; uint8_t pad[7]; } prm{loc, false, {}};
+            Need(CallWith(p, "TeleportToLocation", prm), "TeleportToLocation");
+            return {true, "teleporting to " + name};
+        }
         if (cmd == "interact") {   // interact <actor name>: the local player uses it (pickup, door, chest, checkpoint ...)
             std::string name; in >> name;
             SDK::AActor* a = ActorByName(name);
@@ -749,6 +823,20 @@ public:
                 const auto e = static_cast<int>(static_cast<SDK::UPrimitiveComponent*>(comp)->GetCollisionEnabled());
                 return {true, e >= 0 && e < 4 ? kNames[e] : std::to_string(e)};
             }
+            // <Component>.loc: a scene component variable's position relative to its parent, "x y z" (a door that only
+            // moves its mesh)
+            if (const size_t dot = var.find('.'); dot != std::string::npos && var.substr(dot + 1) == "loc") {
+                if (!ReadVar(a, var.substr(0, dot), out)) throw cb::Error(cb::errc::kInvalidParams, "no variable " + var);
+                SDK::UObject* comp = nullptr;
+                for (SDK::UActorComponent* c : a->BlueprintCreatedComponents)
+                    if (c && ObjName(c) == out) comp = c;
+                if (!comp || !comp->IsA(SDK::USceneComponent::StaticClass()))
+                    throw cb::Error(cb::errc::kInvalidParams, var + " is not a scene component");
+                const SDK::FVector l = static_cast<SDK::USceneComponent*>(comp)->RelativeLocation;
+                char buf[96];
+                std::snprintf(buf, sizeof buf, "%.0f %.0f %.0f", l.X, l.Y, l.Z);
+                return {true, buf};
+            }
             if (!ReadVar(a, var, out)) throw cb::Error(cb::errc::kInvalidParams, "no readable variable " + var + " on " + name);
             return {true, out};
         }
@@ -761,11 +849,12 @@ public:
             Need(CallNoParams(a, fn), fn);
             return {true, "called " + fn + " on " + name};
         }
-        if (cmd == "activate" || cmd == "deactivate") {   // Activate(ByLoad=false, ActorThatTriggered=local player)
-            std::string name; in >> name;
+        if (cmd == "activate" || cmd == "deactivate") {   // activate <actor> [by actor]: Activate(ByLoad=false,
+                                                          // ActorThatTriggered=that actor, or the local player)
+            std::string name, byName; in >> name >> byName;
             SDK::AActor* a = ActorByName(name);
-            auto* p = Player();
-            if (!a || !p) throw cb::Error(cb::errc::kInvalidParams, "no actor " + name + " or no player");
+            SDK::AActor* p = byName.empty() ? static_cast<SDK::AActor*>(Player()) : ActorByName(byName);
+            if (!a || !p) throw cb::Error(cb::errc::kInvalidParams, "no actor " + name + " or " + (byName.empty() ? "no player" : byName));
             struct { bool byLoad; uint8_t pad[7]; SDK::AActor* by; } prm{false, {}, p};
             const std::string fn = cmd == "activate" ? "Activate" : "Deactivate";
             Need(CallWith(a, fn, prm), fn);
