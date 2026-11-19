@@ -1723,7 +1723,7 @@ def josami_des(a, b):
     ok, res = boss_encounter(a, b, "JosamiBloodPool", spawner, (-19155, -10812, -16600),
                              # the pool's event trigger runs BeginFight when a player steps in: the dome shuts
                              ("b", f"activate {spawner} ; callon {spawner} BeginFight"), "SZ_Depths", partners=(),
-                             spawn_first=False, open_after=False, goto_cm=900,
+                             spawn_first=False, open_after=False,
                              fight_cls="JosamiKnight")   # the pool itself never attacks: its knights do
     if ok is None:
         return ok, res
