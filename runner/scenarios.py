@@ -619,11 +619,11 @@ def drops_and_xp(a, b, spot=(3000, -2000, 500), kills=10):
 
     pk_a, pk_b = visible_pickups(a), visible_pickups(b)
     kill_at = [en["pos"] for en in targets]
-    # drops land at the enemy's feet and are spawned at run time ("<Class>_<number>"); placed pickups that stream in
-    # near a kill are not drops
+    # drops land at the enemy's feet and are spawned at run time ("<Class>_<number>", and the bridge's drop flag);
+    # placed pickups that stream in near a kill are not drops
     near_kill = lambda p: any(dist(p["pos"], k) < 800 for k in kill_at) and p["name"].startswith(p["class"] + "_")
-    new = {"A": {n: p for n, p in pk_a.items() if n not in picks_before["A"] and near_kill(p)},
-           "B": {n: p for n, p in pk_b.items() if n not in picks_before["B"] and near_kill(p)}}
+    new = {"A": {n: p for n, p in pk_a.items() if n not in picks_before["A"] and near_kill(p) and p.get("drop", True)},
+           "B": {n: p for n, p in pk_b.items() if n not in picks_before["B"] and near_kill(p) and p.get("drop", True)}}
     res = {"spot": spot, "kills": rows,
            "xp": {n: [before[n]["xp"], after[n]["xp"]] for n in ("A", "B")},
            "kill_counts": {n: after[n]["kills"] for n in ("A", "B")},
@@ -1027,6 +1027,306 @@ def lag(a, b, names=LAG_RUNS):
     return not worse, out
 
 
+# ------------------------------------------------------------------ Lane B: bosses and arenas
+# Each boss scenario puts both players at a boss, starts the fight the way the game does (a trigger, the lectern, the
+# boss's own aggro), from the host or from the client, and checks both copies: boss awake, arena locked, the boss's
+# attacks hit each player while it fights them, its death, the arena opening again, the save flags and each player's
+# own reward. Bosses run on the host; "client started" means the client's player set the fight off.
+
+def actors(g, word, radius=0):
+    """Loaded actors whose class or name contains `word` (bridge `actors`): name, class, pos, hidden, collision."""
+    return json.loads(g.exec(f"actors {word} {radius}")["output"])
+
+
+def getvar(g, actor, var):
+    try:
+        return g.exec(f"getvar {actor} {var}")["output"]
+    except Exception:
+        return None
+
+
+def boss_of(g, cls):
+    """This copy's boss of class `cls` (actor names differ per copy): name, dead, hp, plus DeathIsSuspended."""
+    found = [e for e in g.state(sections=["enemies"])["enemies"] if cls in e["class"]]
+    if not found:
+        return None
+    e = sorted(found, key=lambda x: (x["dead"], x["dist"]))[0]
+    e["suspended"] = getvar(g, e["name"], "DeathIsSuspended") == "true"
+    e["trap"] = getvar(g, e["name"], "InTrapMode") == "true"
+    return e
+
+
+def door_open(g, name):
+    """A gate with a blocker box (Sword Shrine gates) is open when the box has no collision; other Door_Base doors
+    report Opened; other arena walls (the Necronomicon's) are open when hidden or without collision."""
+    box = getvar(g, name, "ClosedBox.collision")
+    if box is not None:
+        return box == "none"
+    v = getvar(g, name, "Opened")
+    if v in ("true", "false"):
+        return v == "true"
+    found = [x for x in actors(g, name) if x["name"] == name]
+    if not found:
+        return None
+    return found[0]["hidden"] or not found[0]["collision"]
+
+
+def named(g, *words):
+    nsd = save(g).get("namedSaveData") or {}
+    return {k: v for k, v in nsd.items() if any(w in k for w in words)}
+
+
+def ensure_boss(a, b, cls, spawner, wait_s=20):
+    """The boss exists on both copies; a spawner that has not spawned it yet (quest conditions, distance) is told to
+    on the host, which decides spawns for everyone."""
+    if not boss_of(a, cls):
+        a.exec(f"callon {spawner} Force Respawn")
+    end = time.time() + wait_s
+    while time.time() < end:
+        if boss_of(a, cls) and boss_of(b, cls):
+            return True
+        time.sleep(1)
+    return False
+
+
+def fight_half(g, other, cls, seconds):
+    """`g` fights the boss for `seconds` (its hits make it the boss's target); both players' health dents counted."""
+    for x in (g, other):
+        x.exec("watch start 3000 Zzz")
+    end = time.time() + seconds
+    next_goto = 0.0
+    while time.time() < end:
+        if time.time() >= next_goto:
+            g.exec(f"kd egoto {cls} 250")
+            next_goto = time.time() + 6
+        g.exec(f"kd ehit {cls} 1")
+        time.sleep(2.5)
+    out = []
+    for x in (g, other):
+        x.exec("watch stop")
+        h = x.state(sections=["watch"])["watch"]["health"]
+        out.append({"hits": h["drops"], "damage": round(h["damage"])})
+    return out
+
+
+def fight(a, b, cls, seconds=60):
+    """Half the time the boss fights B (its attacks reach B through the mirrored hitboxes), half the time A."""
+    hb = fight_half(b, a, cls, seconds / 2)
+    ha = fight_half(a, b, cls, seconds / 2)
+    return {"b_fights": {"b": hb[0], "a": hb[1]}, "a_fights": {"a": ha[0], "b": ha[1]}}
+
+
+def kill(a, cls, tries=60, dmg=4000):
+    """The host (the boss's owner) hits it until it is dead or kneels (bosses with a talk-to-loot death)."""
+    for i in range(tries):
+        bs = boss_of(a, cls)
+        if not bs or bs["dead"] or bs["suspended"]:
+            return i
+        a.exec(f"kd ehit {cls} {dmg}")
+        time.sleep(1.5)
+    return tries
+
+
+def talk_reward(g, boss_name, presses=25):
+    """The local player talks to its own copy of a defeated boss and clicks through the reward dialogue; then the
+    dialogue's own end runs (what leaving the conversation does), which is when the boss really dies."""
+    inv0 = dict(save(g).get("inventory") or {})
+    g.exec(f"interact {boss_name}")
+    time.sleep(3)
+    for _ in range(presses):
+        try:
+            g.exec("uicall DialogueScreen ConfirmPressed")
+        except Exception:
+            break
+        time.sleep(1.2)
+    for npc in actors(g, "DummyNPC"):
+        for fn in ("EndDialogue", "DoneSpeaking"):
+            try:
+                g.exec(f"callon {npc['name']} {fn}")
+                break
+            except Exception:
+                pass
+    time.sleep(4)
+    inv = dict(save(g).get("inventory") or {})
+    return {k: (inv0.get(k), v) for k, v in inv.items() if inv0.get(k) != v}
+
+
+def both(fn, a, b):
+    return {"a": fn(a), "b": fn(b)}
+
+
+def boss_scenario_start(a, b, spot_a, spot_b):
+    for g in (a, b):
+        g.exec("kd god 1")
+    a.exec("tp {} {} {} 0".format(*spot_a))
+    b.exec("tp {} {} {} 0".format(*spot_b))
+    time.sleep(8)
+
+
+def boss_scenario_end(a, b):
+    for g in (a, b):
+        g.exec("kd god 0")
+
+
+def grave_guardian(a, b):
+    """Grave Guardian (Sword Shrine, Ruins). The CLIENT crosses its trigger: the entrance gate closes and the boss
+    wakes on both copies; its swings hit each player it fights; it kneels on both; each player talks to their own copy
+    and gets the Stone Duck key; the gates open on both and both saves have ShrineBossKilled."""
+    cls, spawner, gates = "Shrineboss_BP", "ShrinebossSpawner", ("SwordShrineGate_BP_2", "SwordShrineGate_BP2")
+    boss_scenario_start(a, b, (17900, -7300, 50), (17900, -7500, 50))
+    if not ensure_boss(a, b, cls, spawner):
+        return None, {"why": "the Grave Guardian is not on both copies"}
+    res, checks = {}, {}
+    # Arriving may already have set the fight off. The host resets the arena the way the game does when its player
+    # leaves the fight (entrance open, exit shut, boss back at its spawner, the start armed again): it reaches the
+    # client too.
+    a.exec(f"callon {spawner} PlayerTeleportedOutOfBossArena")
+    time.sleep(8)
+    ensure_boss(a, b, cls, spawner)
+    entrance = getvar(a, spawner, "EntranceGate")
+    res["entrance"] = entrance
+    res["after_reset"] = both(lambda g: door_open(g, entrance), a, b)
+    checks["arena_reset_both"] = res["after_reset"] == {"a": True, "b": True}
+    # the client walks in: what the shrine's trigger runs for the player who crosses it (only on that machine)
+    b.exec(f"activate {spawner}")
+    time.sleep(6)
+    res["after_start"] = {"entrance_open": both(lambda g: door_open(g, entrance), a, b),
+                          "boss": both(lambda g: boss_of(g, cls), a, b)}
+    checks["arena_locked_both"] = res["after_start"]["entrance_open"] == {"a": False, "b": False}
+    checks["boss_awake_both"] = all(x and not x["trap"] for x in res["after_start"]["boss"].values())
+    res["fight"] = fight(a, b, cls)
+    checks["attacks_hit_b"] = res["fight"]["b_fights"]["b"]["hits"] > 0
+    checks["attacks_hit_a"] = res["fight"]["a_fights"]["a"]["hits"] > 0
+    res["kill_hits"] = kill(a, cls)
+    time.sleep(4)
+    res["after_kill"] = both(lambda g: boss_of(g, cls), a, b)
+    checks["defeated_both"] = all(x and (x["dead"] or x["suspended"]) for x in res["after_kill"].values())
+    res["reward_a"] = talk_reward(a, res["after_kill"]["a"]["name"]) if res["after_kill"]["a"] else {}
+    res["reward_b"] = talk_reward(b, res["after_kill"]["b"]["name"]) if res["after_kill"]["b"] else {}
+    checks["reward_a"] = "StoneDuckShopUnlock" in res["reward_a"]
+    checks["reward_b"] = "StoneDuckShopUnlock" in res["reward_b"]
+    time.sleep(4)
+    res["saves"] = both(lambda g: named(g, "ShrineBoss"), a, b)
+    res["gates_after"] = {gt: both(lambda g: door_open(g, gt), a, b) for gt in gates}
+    checks["killed_flag_both"] = all(s.get("ShrineBossKilled") == 1 for s in res["saves"].values())
+    checks["own_reward_counter_each"] = all(s.get("ShrineBossRewardCount") == 1 for s in res["saves"].values())
+    checks["arena_open_both"] = all(v == {"a": True, "b": True} for v in res["gates_after"].values())
+    boss_scenario_end(a, b)
+    res["checks"] = checks
+    return all(checks.values()), res
+
+
+def executioner(a, b):
+    """Executioner (Library). It wakes for the CLIENT, who fights it: the boss runs on the host, whose aggro closes the
+    front door on both copies; its axe swings and spins hit the client (no attack of it reached a follower before);
+    it dies on both, the door opens on both and both saves have ExecutionerKilled."""
+    cls, spawner = "ExecutionerMiniboss_BP", "ExecutionerMiniboss_Spawner"
+    boss_scenario_start(a, b, (26000, 754, 1300), (26000, 900, 1300))
+    if not ensure_boss(a, b, cls, spawner):
+        return None, {"why": "the Executioner is not on both copies"}
+    res, checks = {}, {}
+    door = getvar(a, spawner, "FrontDoor")
+    res["door"] = door
+    a.exec(f"callon {door} OpenDoor")
+    time.sleep(6)
+    res["door_opened_by_host"] = both(lambda g: door_open(g, door), a, b)
+    checks["door_open_follows"] = res["door_opened_by_host"]["b"] is True
+    b.exec(f"kd ewake {cls}")
+    time.sleep(3)
+    res["fight"] = fight(a, b, cls)
+    checks["attacks_hit_b"] = res["fight"]["b_fights"]["b"]["hits"] > 0
+    checks["attacks_hit_a"] = res["fight"]["a_fights"]["a"]["hits"] > 0
+    res["door_in_fight"] = both(lambda g: door_open(g, door), a, b)
+    checks["arena_locked_both"] = res["door_in_fight"] == {"a": False, "b": False}
+    res["kill_hits"] = kill(a, cls)
+    time.sleep(6)
+    res["after_kill"] = both(lambda g: boss_of(g, cls), a, b)
+    checks["dead_both"] = all(x is None or x["dead"] for x in res["after_kill"].values())
+    res["door_after"] = both(lambda g: door_open(g, door), a, b)
+    checks["arena_open_both"] = res["door_after"] == {"a": True, "b": True}
+    res["saves"] = both(lambda g: named(g, "Executioner"), a, b)
+    checks["killed_flag_both"] = all(s.get("ExecutionerKilled") == 1 for s in res["saves"].values())
+    boss_scenario_end(a, b)
+    res["checks"] = checks
+    return all(checks.values()), res
+
+
+def necronomicon(a, b):
+    """Necronomicon (Library top). The CLIENT reads the lectern: the door appears and the boss starts its intro on both
+    copies. Every form change of the host's copy runs on the client's copy too; its attacks hit each player it fights;
+    it kneels on both, each player gets its reward from their own copy, both saves have NecronimiconDefeated (the
+    game's spelling) and the door agrees afterwards."""
+    cls, spawner, door = "Necronomicon_BP", "Necronomicon_Boss_Spawner", "NecroBossDoor_SM"
+    boss_scenario_start(a, b, (26396, -300, 15150), (26396, -450, 15150))
+    if not ensure_boss(a, b, cls, spawner):
+        return None, {"why": "the Necronomicon is not on both copies"}
+    res, checks = {}, {}
+    log_from = {n: len(kd_log_all(n)) for n in ("A", "B")}
+    res["door_before"] = both(lambda g: door_open(g, door), a, b)
+    b.exec(f"interact {spawner}")
+    time.sleep(12)
+    res["after_start"] = {"door_open": both(lambda g: door_open(g, door), a, b),
+                          "boss": both(lambda g: boss_of(g, cls), a, b)}
+    checks["arena_locked_both"] = res["after_start"]["door_open"] == {"a": False, "b": False}
+    checks["boss_awake_both"] = all(x and not x["trap"] for x in res["after_start"]["boss"].values())
+    res["fight"] = fight(a, b, cls)
+    checks["attacks_hit_b"] = res["fight"]["b_fights"]["b"]["hits"] > 0
+    checks["attacks_hit_a"] = res["fight"]["a_fights"]["a"]["hits"] > 0
+    # forms: its AI leaves the book form on its own and its other forms end when their own health runs out. Light
+    # hits for a while; every form change the host's copy makes must run on the client's copy too.
+    end = time.time() + 120
+    while time.time() < end:
+        bs = boss_of(a, cls)
+        if not bs or bs["dead"] or bs["suspended"]:
+            break
+        a.exec(f"kd ehit {cls} 150")
+        time.sleep(3)
+    sent = [l.split("[bosssync] sent ")[1].split(" (")[0] for l in kd_log_all("A")[log_from["A"]:] if "[bosssync] sent " in l]
+    ran = [l.split("[bosssync] ran ")[1].split(" on ")[0] for l in kd_log_all("B")[log_from["B"]:] if "[bosssync] ran " in l]
+    form_fns = ("TransitionTo", "EnterEyeState", "ChangeFromBookForm", "Return From BOok Form", "Exit")
+    res["forms_sent_by_host"] = [x for x in sent if x.startswith(form_fns)]
+    res["forms_run_on_client"] = [x for x in ran if x.startswith(form_fns)]
+    checks["forms_follow"] = bool(res["forms_sent_by_host"]) and         sorted(res["forms_sent_by_host"]) == sorted(res["forms_run_on_client"])
+    res["kill_hits"] = kill(a, cls)
+    time.sleep(8)
+    res["after_kill"] = both(lambda g: boss_of(g, cls), a, b)
+    checks["defeated_both"] = all(x and (x["dead"] or x["suspended"]) for x in res["after_kill"].values())
+    res["reward_a"] = talk_reward(a, res["after_kill"]["a"]["name"]) if res["after_kill"]["a"] else {}
+    res["reward_b"] = talk_reward(b, res["after_kill"]["b"]["name"]) if res["after_kill"]["b"] else {}
+    # its reward NPC hands out the next item of its list per conversation: each player gets the same one
+    checks["reward_each"] = bool(res["reward_a"]) and set(res["reward_a"]) == set(res["reward_b"])
+    time.sleep(4)
+    res["saves"] = both(lambda g: named(g, "Necron"), a, b)
+    checks["defeated_flag_both"] = all(s.get("NecronimiconDefeated") == 1 for s in res["saves"].values())
+    counters = [s.get("NecronomiconRewardCount") for s in res["saves"].values()]
+    checks["own_reward_counter_each"] = counters[0] == counters[1] and (counters[0] or 0) >= 1
+    # its door stays after the fight (only an arena reset hides it, also in single player): it must agree
+    res["door_after"] = both(lambda g: door_open(g, door), a, b)
+    checks["door_agrees_after"] = res["door_after"]["a"] == res["door_after"]["b"]
+    boss_scenario_end(a, b)
+    res["checks"] = checks
+    return all(checks.values()), res
+
+
+def lost_librarian(a, b):
+    """Lost Librarian (Library). No arena or reward talk: it dies on both copies and both saves have
+    LostLibrarianKilled, which the Librarian NPC's greeting reads."""
+    cls, spawner = "LostLibrarian_BP", "LostLibrarian_Spawner_BP"
+    boss_scenario_start(a, b, (28657, -3400, 3700), (28657, -3550, 3700))
+    if not ensure_boss(a, b, cls, spawner):
+        return None, {"why": "the Lost Librarian is not on both copies"}
+    res, checks = {}, {}
+    res["kill_hits"] = kill(a, cls)
+    time.sleep(6)
+    res["after_kill"] = both(lambda g: boss_of(g, cls), a, b)
+    checks["dead_both"] = all(x is None or x["dead"] for x in res["after_kill"].values())
+    res["saves"] = both(lambda g: named(g, "LostLibrarian"), a, b)
+    checks["killed_flag_both"] = all(s.get("LostLibrarianKilled") == 1 for s in res["saves"].values())
+    boss_scenario_end(a, b)
+    res["checks"] = checks
+    return all(checks.values()), res
+
+
 SCENARIOS = {"movement": movement, "loot_and_world": loot_and_world, "client_loot": client_loot,
              "host_world_objects": host_world_objects, "client_world_objects": client_world_objects,
              "host_gate": host_gate, "client_gate": client_gate,
@@ -1034,6 +1334,8 @@ SCENARIOS = {"movement": movement, "loot_and_world": loot_and_world, "client_loo
              "rejoin": rejoin, "client_progress_persists": client_progress_persists,
              "ranged_attacks": ranged_attacks, "area_attacks": area_attacks, "drops_and_xp": drops_and_xp,
              "enemy_hp_agree": enemy_hp_agree, "death": death, "host_leaves": host_leaves,
+             "grave_guardian": grave_guardian, "executioner": executioner, "necronomicon": necronomicon,
+             "lost_librarian": lost_librarian,
              "lag": lag}
 
 # Each group runs on a freshly booted pair, so one group's actions never leak into the next one's checks.
@@ -1179,7 +1481,19 @@ SUITES = {
     # round 2, Lane A: events the party shares (the cutscene last: it can move players around)
     "laneA": [["triggers_shared", "pot_loot"], ["cutscene_shared"]],
 }
-SUITES["all"] = SUITES["lane1"] + SUITES["lane2"] + SUITES["laneA"]
+# Lane B: each boss changes the world for good (a defeated boss stays defeated): one fresh pair per area group
+SUITES["b1"] = [["grave_guardian"], ["executioner", "lost_librarian"], ["necronomicon"]]
+SUITES["laneb"] = SUITES["b1"]
+SUITES["all"] = SUITES["lane1"] + SUITES["lane2"] + SUITES["laneA"] + SUITES["laneb"]
+
+
+RESULTS_PATH = None   # set by main: the run's results file, rewritten after every scenario
+
+
+def save_results(results):
+    if RESULTS_PATH:
+        with open(RESULTS_PATH, "w", encoding="utf-8") as f:
+            json.dump(results, f, indent=1)
 
 
 def run(names, results):
@@ -1195,13 +1509,18 @@ def run(names, results):
             ok, info = False, {"error": repr(e)}
         verdict = "SKIP" if ok is None else "PASS" if ok else "FAIL"
         results[n] = {"result": verdict, **info}
+        save_results(results)   # a crash or a power cut keeps what ran so far
         print(f"{n:24s} {verdict}  {json.dumps(info)[:400]}", flush=True)
         if n == "rejoin" or n.endswith("_persists"):   # these replace a copy: reconnect
             a, b = rig.connect("A"), rig.connect("B")
 
 
 def main(argv):
+    global RESULTS_PATH
     results = {}
+    RESULTS_PATH = os.path.join(rig.LAB, "results", time.strftime("%Y%m%d-%H%M%S") + ".json")
+    os.makedirs(os.path.dirname(RESULTS_PATH), exist_ok=True)
+    print("results go to", RESULTS_PATH, flush=True)
     if argv and argv[0] == "--suite":
         for group in SUITES[argv[1]]:
             rig.qdlab.stop()
@@ -1213,12 +1532,9 @@ def main(argv):
         rig.qdlab.stop()
     else:
         run(argv or [n for n in SCENARIOS if n != "lag"], results)
-    out = os.path.join(rig.LAB, "results", time.strftime("%Y%m%d-%H%M%S") + ".json")
-    os.makedirs(os.path.dirname(out), exist_ok=True)
-    with open(out, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=1)
+    save_results(results)
     print("SUMMARY", json.dumps({n: r["result"] for n, r in results.items()}))
-    print("saved", out)
+    print("saved", RESULTS_PATH)
 
 
 if __name__ == "__main__":

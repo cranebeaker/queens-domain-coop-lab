@@ -32,7 +32,7 @@ WindowPosY={y}
 FullscreenMode=2
 LastConfirmedFullscreenMode=2
 PreferredFullscreenMode=2
-FrameRateLimit=60.000000
+FrameRateLimit=30.000000
 
 [ScalabilityGroups]
 sg.ResolutionQuality=50.000000
@@ -48,6 +48,10 @@ sg.ShadingQuality=0
 
 k32 = ctypes.WinDLL("kernel32", use_last_error=True)
 u32 = ctypes.WinDLL("user32", use_last_error=True)
+u32.GetForegroundWindow.restype = wt.HWND
+u32.SetForegroundWindow.argtypes = [wt.HWND]
+u32.GetWindowThreadProcessId.argtypes = [wt.HWND, ctypes.POINTER(wt.DWORD)]
+u32.ClipCursor.argtypes = [ctypes.c_void_p]
 
 
 def copy_dir(name):
@@ -77,6 +81,33 @@ def seed_settings(name):
     x, y = window_pos(name)
     with open(os.path.join(cfg, "GameUserSettings.ini"), "w", encoding="utf-8") as f:
         f.write(SETTINGS.format(w=WIN_W, h=WIN_H, x=x, y=y))
+    # A focused Unreal window captures the mouse (hides it and keeps it inside the window). The lab copies run while
+    # their owner works on something else: never capture or lock it.
+    with open(os.path.join(cfg, "Input.ini"), "w", encoding="utf-8") as f:
+        f.write("[/Script/Engine.InputSettings]\nbCaptureMouseOnLaunch=False\n"
+                "DefaultViewportMouseCaptureMode=NoCapture\nDefaultViewportMouseLockMode=DoNotLock\n")
+
+
+def give_focus_back(prev, pid, wait=20):
+    """A new game window takes the foreground; hand it back to the window that had it before the launch and free the
+    cursor if the game confined it."""
+    if not prev:
+        return
+    end = time.time() + wait
+    while time.time() < end:
+        fg = u32.GetForegroundWindow()
+        p = wt.DWORD()
+        u32.GetWindowThreadProcessId(fg, ctypes.byref(p))
+        if p.value == pid:
+            # SetForegroundWindow from a background process only works while attached to the foreground thread
+            me = k32.GetCurrentThreadId()
+            fg_thread = u32.GetWindowThreadProcessId(fg, None)
+            u32.AttachThreadInput(me, fg_thread, True)
+            u32.SetForegroundWindow(prev)
+            u32.AttachThreadInput(me, fg_thread, False)
+            u32.ClipCursor(None)
+            return
+        time.sleep(0.5)
 
 
 def pid_windows(pid):
@@ -137,8 +168,13 @@ def launch(name, extra=()):
     env = dict(os.environ)
     env["LOCALAPPDATA"] = local_appdata(name)
     os.makedirs(env["LOCALAPPDATA"], exist_ok=True)
-    p = subprocess.Popen(args, cwd=os.path.dirname(exe), env=env)
+    prev = u32.GetForegroundWindow()
+    si = subprocess.STARTUPINFO()
+    si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    si.wShowWindow = 4   # SW_SHOWNOACTIVATE: do not take the foreground on start
+    p = subprocess.Popen(args, cwd=os.path.dirname(exe), env=env, startupinfo=si)
     place_window(p.pid, name)
+    give_focus_back(prev, p.pid)
     return p.pid
 
 
