@@ -122,6 +122,34 @@ to the other machines, boss hitboxes on the followers' copies), with guards in `
 counters in `WorldSync.cpp`.
 
 <!-- lane-b-status -->
+Two full runs of `runner/scenarios.py --suite laneb` on the Lane B5 mod build (`results/20261119-175602.json`, `results/20261119-194135.json`):
+
+| Area | Scenario | Run 1 | Run 2 |
+|---|---|---|---|
+| B1 | grave_guardian | PASS | PASS |
+| B1 | executioner | PASS | PASS |
+| B1 | lost_librarian | PASS | PASS |
+| B1 | necronomicon | PASS | PASS |
+| B2 | whaleking | PASS | PASS |
+| B2 | king_of_stone | PASS | PASS |
+| B2 | royal_fishmaner | PASS | PASS |
+| B2 | evil_fishwife | PASS | PASS |
+| B2 | white_tree_golem | PASS | PASS |
+| B3 | ros_dragon | PASS | PASS |
+| B3 | josami_des | PASS | PASS |
+| B3 | royal_duo | PASS | PASS |
+| B3 | black_robot_duo | PASS | PASS |
+| B3 | blood_pool_duo | PASS | PASS |
+| B3 | cocker_boss | PASS | PASS |
+| B3 | ribber_boss | PASS | PASS |
+| B4 | demon_duo | PASS | PASS |
+| B4 | bridge_lord | PASS | PASS |
+| B4 | blood_lords | PASS | PASS |
+| B4 | mecha_knights | PASS | PASS |
+| B4 | queen | PASS | PASS |
+| B4 | sipeha | PASS | PASS |
+| B5 | boss_reset_guard | PASS | PASS |
+| B5 | arena_pull_in | PASS | PASS |
 
 ## Status on Knights' Domain 1.0.6 (2026-11-18, Steam build 26663759)
 
