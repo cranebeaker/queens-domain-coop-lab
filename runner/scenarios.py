@@ -1143,12 +1143,24 @@ def boss_far(g, cls):
 
 def kill(a, cls, tries=60, dmg=4000):
     """The host (the boss's owner) hits it until it is dead or kneels (bosses with a talk-to-loot death)."""
-    if not boss_of(a, cls) and boss_far(a, cls):   # it moved away (the Bridge Lord leaps down into its arena)
-        a.exec(f"kd egoto {boss_far(a, cls)} 400")
-        time.sleep(2)
+    far = None
+    if not boss_of(a, cls):
+        far = boss_far(a, cls)
+        if far:   # it moved away (the Bridge Lord leaps down into its arena)
+            a.exec(f"kd egoto {far} 400")
+            time.sleep(2)
     for i in range(tries):
         bs = boss_of(a, cls)
-        if not bs or bs["dead"] or bs["suspended"]:
+        if not bs:
+            # still outside the 60 m enemy list (it fell somewhere the goto found no ground): hit it by name; it only
+            # counts as done once its own copy says it is dead
+            far = far or boss_far(a, cls)
+            if not far or getvar(a, far, "bDead") == "true":
+                return i
+            a.exec(f"kd ehit {far} {dmg}")
+            time.sleep(1.5)
+            continue
+        if bs["dead"] or bs["suspended"]:
             return i
         a.exec(f"kd ehit {bs['name']} {dmg}")
         time.sleep(1.5)
