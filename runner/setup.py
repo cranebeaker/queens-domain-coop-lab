@@ -15,6 +15,7 @@
 Default game dir: C:\\Program Files (x86)\\Steam\\steamapps\\common\\QueensDomain
 Needs: Visual Studio 2022 with C++, CMake 3.25+, git, Python 3.10+, the game on Steam (Steam running).
 """
+import hashlib
 import os
 import shutil
 import subprocess
@@ -40,6 +41,12 @@ SDK_DIR = os.path.join(LAB, "sdk")
 def env_no_ndk():
     e = dict(os.environ)
     e.pop("CMAKE_TOOLCHAIN_FILE", None)   # an Android NDK toolchain here breaks every Windows configure
+    # kismet-analyzer targets net9.0; a PC with the .NET 9 SDK but only a newer runtime (10) still runs it
+    e.setdefault("DOTNET_ROLL_FORWARD", "LatestMajor")
+    # cargo installed by rustup is often not on PATH yet in the same session
+    cargo_bin = os.path.join(os.path.expanduser("~"), ".cargo", "bin")
+    if os.path.isdir(cargo_bin) and cargo_bin not in e.get("PATH", ""):
+        e["PATH"] = e.get("PATH", "") + os.pathsep + cargo_bin
     return e
 
 
@@ -146,7 +153,12 @@ def step_kd():
     if not os.path.isdir(KD_DIR):
         run(["git", "clone", "-b", branch, url, KD_DIR])
     else:
-        run(["git", "pull", "--ff-only"], cwd=KD_DIR)
+        cur = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=KD_DIR, capture_output=True,
+                             text=True).stdout.strip()
+        if cur == branch:
+            run(["git", "pull", "--ff-only"], cwd=KD_DIR)
+        else:   # a working branch (a fix in progress): build it as it is
+            print(f"building the checked-out branch {cur} as it is (not {branch}, so no pull)", flush=True)
     patch_sdk_offsets()
     qdlab.stop()
     sdk = os.path.join(SDK_DIR, "CppSDK").replace("\\", "/")
@@ -174,11 +186,22 @@ def step_decompile():
     if not os.path.isfile(repak):
         run([cargo, "install", "--root", UE_DIR, "--git", REPAK_GIT, "repak_cli", "--locked"])
     ka_src, ka_bin = os.path.join(UE_DIR, "ka"), os.path.join(UE_DIR, "ka-bin")
+    patch = os.path.join(LAB, "tools", "patches", "kismet-analyzer-gen-txt-tree.patch")
+    with open(patch, "rb") as f:
+        patch_id = hashlib.sha1(f.read()).hexdigest()
+    stamp = os.path.join(ka_src, ".qd-patch")
     if not os.path.isdir(ka_src):
         run(["git", "clone", "--recursive", KA_GIT, ka_src])
         run(["git", "checkout", "-q", KA_COMMIT], cwd=ka_src)
-        # adds gen-txt-tree: text only, no graphviz, keeps going past assets it cannot read
-        run(["git", "apply", os.path.join(LAB, "tools", "patches", "kismet-analyzer-gen-txt-tree.patch")], cwd=ka_src)
+    applied = open(stamp).read().strip() if os.path.isfile(stamp) else None
+    if applied != patch_id:
+        # adds gen-txt-tree (text only, no graphviz, keeps going past assets it cannot read) and makes the text cover
+        # every ubergraph entry; a newer patch replaces an older one and the tool is rebuilt
+        run(["git", "checkout", "-q", "--", "."], cwd=ka_src)
+        run(["git", "apply", patch], cwd=ka_src)
+        with open(stamp, "w") as f:
+            f.write(patch_id)
+        shutil.rmtree(ka_bin, ignore_errors=True)
     if not os.path.isfile(os.path.join(ka_bin, "kismet-analyzer.exe")):
         run(["dotnet", "build", "-c", "Release", "-o", ka_bin], cwd=ka_src)
     unpacked = os.path.join(UE_DIR, "unpacked")

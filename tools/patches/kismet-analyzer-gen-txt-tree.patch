@@ -49,3 +49,21 @@ index 98fa5cf..c262fb5 100644
      static void GenCfg(EngineVersion ueVersion, string? mappings, string assetPath, string outputDir)
      {
          UAsset asset = LoadAsset(ueVersion, mappings, assetPath);
+diff --git a/SummaryGenerator.cs b/SummaryGenerator.cs
+index 01967b8..7207fca 100644
+--- a/SummaryGenerator.cs
++++ b/SummaryGenerator.cs
+@@ -485,6 +485,13 @@ public class SummaryGenerator
+         var toVisit = new Queue<uint>();
+         toVisit.Enqueue(instructions[0].Address);
+ 
++        // Code right after a terminator starts a new block even when nothing in this asset jumps there: ubergraph
++        // entries reached through latent actions (Delay, timelines) and bound events. Without this, those events were
++        // left out of the text entirely.
++        for (int i = 0; i + 1 < instructions.Count; ++i)
++            if (IsBlockTerminator(instructions[i]))
++                leaders.Add(instructions[i + 1].Address);
++
+         // Also queue all leaders (they may be jump targets not reachable sequentially)
+         foreach (var leader in leaders)
+             toVisit.Enqueue(leader);

@@ -15,10 +15,12 @@
 #include "SDK/EnemyBase_classes.hpp"
 #include "SDK/ItemPickup_Base_classes.hpp"
 #include "SDK/ItemPickup_Base_parameters.hpp"
+#include "SDK/CoreItemPickupActor_classes.hpp"
 #include "SDK/SavableActor_classes.hpp"
 #include "SDK/SavableActorState_structs.hpp"
 #include "SDK/Checkpoint_classes.hpp"
 #include "SDK/BreakableBarricade_classes.hpp"
+#include "SDK/QueensDomain_parameters.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -28,6 +30,7 @@
 #include <Windows.h>
 
 #include <atomic>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -247,7 +250,7 @@ Value EnemyState(double radiusCm, bool includeHidden = false) {
 }
 
 // Actors of `cls` that live in a level of the current world (GObjects also holds actors of unloaded levels).
-std::vector<SDK::AActor*> WorldActors(SDK::UClass* cls) {
+std::vector<SDK::AActor*> WorldActors(SDK::UClass* cls, bool keepOrigin = false) {
     std::vector<SDK::AActor*> out;
     if (!cls) return out;
     SDK::UWorld* w = World();
@@ -262,7 +265,7 @@ std::vector<SDK::AActor*> WorldActors(SDK::UClass* cls) {
         // actors of streamed-out sublevels have no registered root and report exactly the origin
         if (!a->RootComponent) continue;
         const SDK::FVector p = a->K2_GetActorLocation();
-        if (p.X == 0 && p.Y == 0 && p.Z == 0) continue;
+        if (!keepOrigin && p.X == 0 && p.Y == 0 && p.Z == 0) continue;
         out.push_back(a);
     }
     return out;
@@ -279,7 +282,7 @@ SDK::AActor* ActorByName(const std::string& name) {
     const SDK::FVector at = me ? me->K2_GetActorLocation() : SDK::FVector{};
     SDK::AActor* best = nullptr;
     double bestD = 1e30;
-    for (SDK::AActor* a : WorldActors(SDK::AActor::StaticClass())) {
+    for (SDK::AActor* a : WorldActors(SDK::AActor::StaticClass(), true)) {
         if (a->GetName() != name) continue;
         const double d = Dist(a->K2_GetActorLocation(), at);
         if (d < bestD) { bestD = d; best = a; }
@@ -384,9 +387,77 @@ Value PickupsState(double radiusCm) {
         v.set("pos", Vec(p));
         v.set("dist", std::round(d));
         v.set("hidden", static_cast<bool>(a->bHidden));
+        // a loot drop (spawned by an enemy, chest or pot), as opposed to a pickup placed in the level
+        SDK::UClass* core = SDK::ACoreItemPickupActor_C::StaticClass();
+        v.set("drop", core && a->IsA(core) && static_cast<bool>(static_cast<SDK::ACoreItemPickupActor_C*>(a)->IsADrop));
         list.push(v);
     }
     return list;
+}
+
+// Loaded actors whose class (or a parent class) or object name contains `word`: arena walls, boss doors, fight
+// controllers, reward pickups. `collision` is the actor's own switch (SetActorEnableCollision); arena walls that a
+// fight turns on and off use it or hide the actor.
+std::string ActorsJson(const std::string& word, double radiusCm) {
+    Value list = Value::array();
+    SDK::AFS_PlayerChar_C* me = Player();
+    const SDK::FVector at = me ? me->K2_GetActorLocation() : SDK::FVector{};
+    // some level actors keep their root at the origin and place their parts as offset children (the Necronomicon's
+    // door): the name or class match is enough here
+    for (SDK::AActor* a : WorldActors(SDK::AActor::StaticClass(), true)) {
+        bool match = ObjName(a).find(word) != std::string::npos;
+        for (SDK::UStruct* s = a->Class; s && !match; s = s->SuperStruct) match = s->GetName().find(word) != std::string::npos;
+        if (!match) continue;
+        const SDK::FVector p = a->K2_GetActorLocation();
+        const double d = Dist(p, at);
+        if (me && radiusCm > 0 && d > radiusCm) continue;
+        Value v = Value::object();
+        v.set("name", ObjName(a));
+        v.set("class", ObjName(a->Class));
+        v.set("pos", Vec(p));
+        v.set("dist", std::round(d));
+        v.set("hidden", static_cast<bool>(a->bHidden));
+        v.set("collision", static_cast<bool>(a->bActorEnableCollision));
+        list.push(v);
+    }
+    return list.dump();
+}
+
+// Blueprint variable names carry a GUID suffix (Phase_12_0123...); `var` matches the name before it, or the full name.
+bool ReadVar(SDK::UObject* obj, const std::string& var, std::string& out) {
+    auto lower = [](std::string s) { for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c))); return s; };
+    const std::string want = lower(var);
+    const uint8_t* base = reinterpret_cast<const uint8_t*>(obj);
+    for (SDK::UStruct* st = obj->Class; st; st = st->SuperStruct) {
+        for (SDK::FField* f = st->ChildProperties; f; f = f->Next) {
+            const std::string name = lower(f->Name.ToString());
+            const bool hit = name == want || (name.size() > want.size() && name.compare(0, want.size(), want) == 0 &&
+                                              name[want.size()] == '_' && std::isdigit(static_cast<unsigned char>(name[want.size() + 1])));
+            if (!hit || !f->ClassPrivate) continue;
+            const std::string type = f->ClassPrivate->Name.ToString();
+            auto* p = static_cast<SDK::FProperty*>(f);
+            const uint8_t* at = base + p->Offset;
+            char buf[64];
+            if (type == "BoolProperty") {
+                auto* b = static_cast<SDK::FBoolProperty*>(f);
+                out = (base[p->Offset + b->ByteOffset] & b->ByteMask) ? "true" : "false";
+            } else if (type == "IntProperty") {
+                int32_t v; std::memcpy(&v, at, 4); out = std::to_string(v);
+            } else if (type == "FloatProperty") {
+                float v; std::memcpy(&v, at, 4); std::snprintf(buf, sizeof buf, "%g", v); out = buf;
+            } else if (type == "ByteProperty" || type == "EnumProperty") {
+                out = std::to_string(static_cast<int>(*at));
+            } else if (type == "NameProperty") {
+                out = reinterpret_cast<const SDK::FName*>(at)->ToString();
+            } else if (type == "ObjectProperty") {
+                SDK::UObject* o = nullptr; std::memcpy(&o, at, 8); out = o ? ObjName(o) : "None";
+            } else {
+                out = "<" + type + ">";
+            }
+            return true;
+        }
+    }
+    return false;
 }
 
 // ------------------------------------------------------------------ watch (attack recorder)
@@ -633,6 +704,79 @@ public:
             }
             return {true, "ok"};
         }
+        if (cmd == "levellist") {   // levellist <name>: the game's level manager loads that level list now, the way the
+                                    // player's own priority loads do (a teleport skips the triggers that load areas)
+            std::string name; in >> name;
+            SDK::UObject* list = nullptr;
+            auto& objs = SDK::UObject::GObjects;
+            for (int i = 0; i < objs->Num() && !list; ++i) {
+                SDK::UObject* o = objs->GetByIndex(i);
+                if (o && !o->IsDefaultObject() && o->Class && o->Class->GetName() == "FS_LevelList" && o->GetName() == name)
+                    list = o;
+            }
+            if (!list) throw cb::Error(cb::errc::kInvalidParams, "no level list " + name + " in memory");
+            SDK::UObject* cdo = SDK::AFS_LevelManager::GetDefaultObj();
+            SDK::UFunction* run = FindFn(cdo, "RunPriorityLoad");
+            SDK::UFunction* flush = FindFn(cdo, "FlushLevelManagerActions");
+            if (!run || !flush) throw cb::Error(cb::errc::kInvalidParams, "FS_LevelManager functions not found");
+            SDK::Params::FS_LevelManager_RunPriorityLoad rp{};
+            rp.WorldContextObject = World();
+            rp.List = static_cast<SDK::UFS_LevelList*>(list);
+            rp.bMoveToTriggerListAfterFinished = true;
+            SDK::Params::FS_LevelManager_FlushLevelManagerActions fp{};
+            fp.WorldContextObject = World();
+            fp.bBlocking = true;
+            for (auto [fn, parms] : {std::pair<SDK::UFunction*, void*>{run, &rp}, {flush, &fp}}) {
+                const auto flags = fn->FunctionFlags;
+                fn->FunctionFlags |= 0x400;
+                cdo->ProcessEvent(fn, parms);
+                fn->FunctionFlags = flags;
+            }
+            return {true, "loaded level list " + name};
+        }
+        if (cmd == "levels") {   // levels: the world's streaming levels, one per line: name, should load/show, loaded, shown
+            std::string out;
+            SDK::UWorld* w = World();
+            if (!w) throw cb::Error(cb::errc::kInvalidParams, "no world");
+            for (SDK::ULevelStreaming* ls : w->StreamingLevels) {
+                if (!ls) continue;
+                std::string name = ls->GetWorldAssetPackageFName().ToString();
+                if (auto slash = name.rfind('/'); slash != std::string::npos) name = name.substr(slash + 1);
+                out += name + (ls->bShouldBeLoaded ? " want-load" : "") + (ls->bShouldBeVisible ? " want-show" : "") +
+                       (ls->IsLevelLoaded() ? " loaded" : "") + (ls->IsLevelVisible() ? " shown" : "") + "\n";
+            }
+            return {true, out};
+        }
+        if (cmd == "objs") {   // objs <class name> [word]: names of live objects of that class or a subclass (data assets too)
+            std::string cls, word; in >> cls >> word;
+            std::string out;
+            auto& objs = SDK::UObject::GObjects;
+            for (int i = 0; i < objs->Num(); ++i) {
+                SDK::UObject* o = objs->GetByIndex(i);
+                if (!o || o->IsDefaultObject() || !o->Class) continue;
+                bool is = false;   // that class or a subclass
+                for (SDK::UStruct* c = o->Class; c && !is; c = c->SuperStruct) is = c->GetName() == cls;
+                if (!is) continue;
+                const std::string n = o->GetFullName();
+                if (word.empty() || n.find(word) != std::string::npos) out += n + "\n";
+            }
+            return {true, out};
+        }
+        if (cmd == "tploc") {   // tploc <FS_LocationData name>: the player's own TeleportToLocation (what a teleporter does)
+            std::string name; in >> name;
+            SDK::UObject* loc = nullptr;
+            auto& objs = SDK::UObject::GObjects;
+            for (int i = 0; i < objs->Num() && !loc; ++i) {
+                SDK::UObject* o = objs->GetByIndex(i);
+                if (o && !o->IsDefaultObject() && o->IsA(SDK::UFS_LocationData::StaticClass()) && o->GetName() == name)
+                    loc = o;
+            }
+            auto* p = Player();
+            if (!loc || !p) throw cb::Error(cb::errc::kInvalidParams, "no location " + name + " or no player");
+            struct { SDK::UObject* loc; bool greenFx; uint8_t pad[7]; } prm{loc, false, {}};
+            Need(CallWith(p, "TeleportToLocation", prm), "TeleportToLocation");
+            return {true, "teleporting to " + name};
+        }
         if (cmd == "interact") {   // interact <actor name>: the local player uses it (pickup, door, chest, checkpoint ...)
             std::string name; in >> name;
             SDK::AActor* a = ActorByName(name);
@@ -656,6 +800,46 @@ public:
             }
             return {true, out};
         }
+        if (cmd == "actors") {   // actors <word> [radius cm]: loaded actors whose class or name contains <word>, as JSON
+            std::string word; double radius = 0; in >> word >> radius;
+            if (word.empty()) throw cb::Error(cb::errc::kInvalidParams, "actors <word> [radius cm]");
+            return {true, ActorsJson(word, radius)};
+        }
+        if (cmd == "getvar") {   // getvar <actor> <variable>: a Blueprint variable's value (name match ignores the GUID suffix)
+            std::string name, var; in >> name >> var;
+            SDK::AActor* a = ActorByName(name);
+            if (!a) throw cb::Error(cb::errc::kInvalidParams, "no actor " + name);
+            std::string out;
+            // <Component>.collision: the collision of a component variable (a gate's blocker box): "none" / "query" /
+            // "physics" / "both", as the component reports it now
+            if (const size_t dot = var.find('.'); dot != std::string::npos && var.substr(dot + 1) == "collision") {
+                if (!ReadVar(a, var.substr(0, dot), out)) throw cb::Error(cb::errc::kInvalidParams, "no variable " + var);
+                SDK::UObject* comp = nullptr;
+                for (SDK::UActorComponent* c : a->BlueprintCreatedComponents)
+                    if (c && ObjName(c) == out) comp = c;
+                if (!comp || !comp->IsA(SDK::UPrimitiveComponent::StaticClass()))
+                    throw cb::Error(cb::errc::kInvalidParams, var + " is not a primitive component");
+                static const char* kNames[] = {"none", "query", "physics", "both"};
+                const auto e = static_cast<int>(static_cast<SDK::UPrimitiveComponent*>(comp)->GetCollisionEnabled());
+                return {true, e >= 0 && e < 4 ? kNames[e] : std::to_string(e)};
+            }
+            // <Component>.loc: a scene component variable's position relative to its parent, "x y z" (a door that only
+            // moves its mesh)
+            if (const size_t dot = var.find('.'); dot != std::string::npos && var.substr(dot + 1) == "loc") {
+                if (!ReadVar(a, var.substr(0, dot), out)) throw cb::Error(cb::errc::kInvalidParams, "no variable " + var);
+                SDK::UObject* comp = nullptr;
+                for (SDK::UActorComponent* c : a->BlueprintCreatedComponents)
+                    if (c && ObjName(c) == out) comp = c;
+                if (!comp || !comp->IsA(SDK::USceneComponent::StaticClass()))
+                    throw cb::Error(cb::errc::kInvalidParams, var + " is not a scene component");
+                const SDK::FVector l = static_cast<SDK::USceneComponent*>(comp)->RelativeLocation;
+                char buf[96];
+                std::snprintf(buf, sizeof buf, "%.0f %.0f %.0f", l.X, l.Y, l.Z);
+                return {true, buf};
+            }
+            if (!ReadVar(a, var, out)) throw cb::Error(cb::errc::kInvalidParams, "no readable variable " + var + " on " + name);
+            return {true, out};
+        }
         if (cmd == "callon") {   // callon <actor> <function with no params>
             std::string name, fn; in >> name;
             std::getline(in, fn);
@@ -665,11 +849,12 @@ public:
             Need(CallNoParams(a, fn), fn);
             return {true, "called " + fn + " on " + name};
         }
-        if (cmd == "activate" || cmd == "deactivate") {   // Activate(ByLoad=false, ActorThatTriggered=local player)
-            std::string name; in >> name;
+        if (cmd == "activate" || cmd == "deactivate") {   // activate <actor> [by actor]: Activate(ByLoad=false,
+                                                          // ActorThatTriggered=that actor, or the local player)
+            std::string name, byName; in >> name >> byName;
             SDK::AActor* a = ActorByName(name);
-            auto* p = Player();
-            if (!a || !p) throw cb::Error(cb::errc::kInvalidParams, "no actor " + name + " or no player");
+            SDK::AActor* p = byName.empty() ? static_cast<SDK::AActor*>(Player()) : ActorByName(byName);
+            if (!a || !p) throw cb::Error(cb::errc::kInvalidParams, "no actor " + name + " or " + (byName.empty() ? "no player" : byName));
             struct { bool byLoad; uint8_t pad[7]; SDK::AActor* by; } prm{false, {}, p};
             const std::string fn = cmd == "activate" ? "Activate" : "Deactivate";
             Need(CallWith(a, fn, prm), fn);

@@ -23,7 +23,14 @@ Steps can be run one by one (`copies`, `dumper`, `sdk`, `kd`, `bridge`); see `py
 game is not in the default Steam folder, pass its folder: `runner/setup.py all "D:\SteamLibrary\steamapps\common\QueensDomain"`.
 
 Test windows open on a second monitor placed to the right of a 1920-wide main screen. Change `MON_X` / `MON_Y` in
-`runner/qdlab.py` for your screens.
+`runner/qdlab.py` for your screens. The copies never take the mouse: each copy's `Input.ini` turns mouse capture and
+lock off, a new window starts without activating and the foreground goes back to the window you were using, so you
+can keep working while a suite runs.
+
+Reading the game's Blueprints (`py -3 -I runner/setup.py decompile`, see TASKS.md) also needs Rust (cargo, from
+rustup) and the .NET 9 SDK; a newer .NET runtime is fine when the 9 runtime is missing. `py -3 -I tools/maplocs.py`
+then writes `tools/ue/actor_locs.tsv`: every placed actor of the Ruins maps with its class and world position (boss
+spawners, arena doors, triggers), which the boss scenarios use for their spots.
 
 ## Layout
 
@@ -38,16 +45,20 @@ Test windows open on a second monitor placed to the right of a 1920-wide main sc
 | `runner/setup.py` | One-time setup (copies, Dumper-7, SDK, Knights' Domain dev build, bridge). |
 | `third_party/coopbridge` | Bridge server header and Python client from the [Co-op Anything](https://github.com/cranebeaker/coop-anything) hub (MIT). |
 | `tools/Dumper-7` | Not in git: cloned by setup at a pinned commit and patched to build with `/std:c++latest` and to write into `sdk/`. |
+| `tools/ue` | Not in git: the decompiled Blueprints, their index and `actor_locs.tsv` (all built from your own copy). |
+| `tools/maplocs.py`, `tools/bpindex.py` | Build `tools/ue/actor_locs.tsv` and `tools/ue/bp_index.md`. |
 
-The mod's dev build lives in `..\knights-domain\build-dev\Release` (its `source` branch, 1.0.6 since
-2026-11-18), installed into both copies as `xinput1_3.dll` plus `KnightsDomain\KnightsDomain.dll`.
-`setup.py kd` pulls the newest source, makes the two SDK header edits 1.0.6 needs and reinstalls.
+The mod's dev build lives in `..\knights-domain\build-dev\Release` (our fork's `world-sync` branch), installed into
+both copies as `xinput1_3.dll` plus `KnightsDomain\KnightsDomain.dll`. `setup.py kd` pulls `world-sync`, makes the two
+SDK header edits 1.0.6 needs and reinstalls; with another branch checked out there (a fix in progress) it builds that
+branch as it is.
 
 ## Run it
 
 ```
 py -3 -I runner/scenarios.py --suite all     # boots fresh pairs itself and runs both lanes, ~35 min
 py -3 -I runner/scenarios.py --suite lane1   # or one lane (lane1 ~12 min, lane2 ~20 min)
+py -3 -I runner/scenarios.py --suite laneb   # Lane B bosses; or one area: b1 (~15 min) ... b5
 py -3 -I runner/scenarios.py lag             # Lane 2 again through a lag relay, ~18 min
 py -3 -I runner/rig.py pair                  # or: boot A (host) and B (client) by hand, ~2.5 min
 py -3 -I runner/scenarios.py host_gate       # ... and run single scenarios against the running pair
@@ -88,12 +99,29 @@ switches), `callon <actor> <function>` (any function with no parameters, e.g. `I
 (turn off collision of nearby enemies, test setup only), `passthrough <actor> [cm] [up]` (can the player walk through
 it, both ways, with collision), `sweep x y z`, `call <function>` on the player, `kd <line>` (the mod's dev command file), `die` (the local player dies through the player Blueprint's own `Kill`), `widgets [class match]` (live UI widget classes; with a match, also that widget's own functions), `uicall <widget class match> <function>` (call a function on a live widget, e.g. the Game Over screen's Continue button), `kd <line>` (the mod's dev command file),
 
+`actors <word> [radius cm]`: loaded actors whose class (or a parent class) or name contains the word, as JSON with
+position, `hidden` and `collision` (the actor's own switch); actors whose root sits at the origin (the Necronomicon's
+door) are included. `getvar <actor> <variable>`: a Blueprint variable of an actor (bool, int, float, byte, name,
+object name; the name without its GUID suffix), or `<Component>.collision` for a component variable's collision
+(`none`, `query`, `physics`, `both`: a gate's blocker box).
+
 `watch start [radius cm] [word ...]` / `watch stop`: on the game thread every 50 ms, record each actor within the radius whose
 class or a parent class name contains one of the words (default: Projectile, Arrow, Splash, Vortex, Whirl, Wave, AOE,
 Spit, Puddle, Fireball, Creep, Explosion, Shockwave) with its class, instigator and closest approach, and every drop in the local player's health with the closest such actor at that moment. With the
 mod's `kd god` on, health sits near 1,000,000 and is only refilled below 100,000, so every hit leaves a dent.
 
 `eval`: `world`, `title`, `loading`, `inworld`, `health`.
+
+## Lane B: bosses and arenas (world-sync fork)
+
+Each boss scenario puts both players at a boss, starts the fight the way the game does (its trigger, its lectern, its
+own aggro, a talk), from the host or from the client, and checks both copies: the boss awake, the arena shut, the
+boss's attacks hitting each player while it fights them, its death (or kneeling), the arena afterwards, the save flags
+and each player's own reward. The fixes are in the mod's `sync/BossSync.cpp` (boss and arena Blueprint calls mirrored
+to the other machines, boss hitboxes on the followers' copies), with guards in `EnemySync.cpp` and per-player reward
+counters in `WorldSync.cpp`.
+
+<!-- lane-b-status -->
 
 ## Status on Knights' Domain 1.0.6 (2026-11-18, Steam build 26663759)
 
