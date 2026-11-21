@@ -1094,6 +1094,47 @@ int g_vhookCount = 0;
 thread_local bool t_inPump = false;
 ULONGLONG g_lastPump = 0;
 
+// The lab copies run on the owner's PC while they use it: a copy must stay a small window on the second monitor and
+// never keep the mouse. The game resets its own video settings when a new game starts (it went fullscreen mid-run and
+// took the mouse), so every 2 s: back to the -ResX x -ResY window at -WinX/-WinY if it changed, and a cursor the game
+// confined to its window is let go.
+void KeepWindowSmall() {
+    static ULONGLONG last = 0;
+    const ULONGLONG now = GetTickCount64();
+    if (now - last < 2000) return;
+    last = now;
+    const int w = ArgInt(L"-ResX=", 800), h = ArgInt(L"-ResY=", 450);
+    const int x = ArgInt(L"-WinX=", 1920), y = ArgInt(L"-WinY=", 40);
+    if (SDK::UGameUserSettings* gus = SDK::UGameUserSettings::GetGameUserSettings()) {
+        const SDK::FIntPoint r = gus->GetScreenResolution();
+        if (gus->GetFullscreenMode() != SDK::EWindowMode::Windowed || r.X != w || r.Y != h) {
+            gus->SetFullscreenMode(SDK::EWindowMode::Windowed);
+            gus->SetScreenResolution(SDK::FIntPoint{w, h});
+            gus->ApplyResolutionSettings(false);
+        }
+    }
+    struct Find { DWORD pid; HWND hwnd; } f{GetCurrentProcessId(), nullptr};
+    EnumWindows([](HWND hw, LPARAM lp) -> BOOL {
+        auto* ff = reinterpret_cast<Find*>(lp);
+        DWORD p = 0;
+        GetWindowThreadProcessId(hw, &p);
+        if (p == ff->pid && IsWindowVisible(hw) && !GetWindow(hw, GW_OWNER)) { ff->hwnd = hw; return FALSE; }
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&f));
+    if (!f.hwnd) return;
+    RECT wr{};
+    GetWindowRect(f.hwnd, &wr);
+    const LONG style = GetWindowLongW(f.hwnd, GWL_STYLE);
+    if (!(style & WS_CAPTION)) SetWindowLongW(f.hwnd, GWL_STYLE, style | WS_OVERLAPPEDWINDOW);   // borderless -> framed
+    if (wr.left != x || wr.top != y || wr.right - wr.left > w + 40 || wr.bottom - wr.top > h + 60)
+        SetWindowPos(f.hwnd, nullptr, x, y, w, h, SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED);
+    RECT clip{};
+    GetWindowRect(f.hwnd, &wr);
+    if (GetClipCursor(&clip) && clip.left >= wr.left - 8 && clip.right <= wr.right + 8 && clip.top >= wr.top - 40 &&
+        clip.bottom <= wr.bottom + 8)
+        ClipCursor(nullptr);
+}
+
 template <int I>
 void HookedProcessEvent(SDK::UObject* obj, SDK::UFunction* fn, void* parms) {
     if (!t_inPump && GetCurrentThreadId() == g_gameThread) {
@@ -1103,6 +1144,7 @@ void HookedProcessEvent(SDK::UObject* obj, SDK::UFunction* fn, void* parms) {
             t_inPump = true;
             g_server.Pump();
             WatchTick();
+            KeepWindowSmall();
             t_inPump = false;
         }
     }

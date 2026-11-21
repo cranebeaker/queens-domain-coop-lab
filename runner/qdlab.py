@@ -18,7 +18,7 @@ COPIES = os.path.join(LAB, "copies")
 EXE_REL = os.path.join("QueensDomain", "Binaries", "Win64", "QueensDomain-Win64-Shipping.exe")
 # second monitor (DISPLAY1) origin and window size / slot per copy
 MON_X, MON_Y = 1920, 0
-WIN_W, WIN_H = 960, 540
+WIN_W, WIN_H = 800, 450
 SLOTS = {"A": (0, 0), "B": (1, 0), "C": (0, 1), "D": (1, 1)}
 
 SETTINGS = """[/Script/Engine.GameUserSettings]
