@@ -2,6 +2,9 @@
 
   py -3 -I runner/scenarios.py [name ...]      run scenarios against an already booted pair (rig.py pair)
   py -3 -I runner/scenarios.py --suite lane1   boot fresh pairs and run all of Lane 1 (about 12 minutes)
+  py -3 -I runner/scenarios.py --suite all --rerun results/<time>.json   only what did not pass last time
+  py -3 -I runner/scenarios.py --suite all --only ros_dragon,queen        just these (each with its group's pair)
+  py -3 -I runner/scenarios.py --help                                     every option and suite
 
 Each scenario prints PASS / FAIL / SKIP with the numbers it measured. A scenario passes when the co-op behaviour is
 right, so FAIL means the gap is real. SKIP means the setup did not happen (the measurement would prove nothing).
@@ -82,13 +85,18 @@ def pickup_by(taker, other, who, target):
     if before_t is None:
         return None, {"why": f"{target} not loaded on {who}"}
     inv_before = save(taker).get("inventory", {})
-    taker.exec(f"tpto {target} 120")
-    time.sleep(1)
-    taker.exec(f"interact {target}")
     after_t = before_t
-    for _ in range(10):   # the pickup animation runs before the save entry is written
-        time.sleep(2)
-        after_t = obj_state(taker, target)
+    # after a long teleport (the gate check) the pickup's sublevel can take a moment to settle: the first interact
+    # then does nothing, so the player tries again, as someone standing at the item would
+    for attempt in range(3):
+        taker.exec(f"tpto {target} 120")
+        time.sleep(1 + 2 * attempt)
+        taker.exec(f"interact {target}")
+        for _ in range(5):   # the pickup animation runs before the save entry is written
+            time.sleep(2)
+            after_t = obj_state(taker, target)
+            if after_t != before_t:
+                break
         if after_t != before_t:
             break
     time.sleep(2)
@@ -492,33 +500,8 @@ def area_attacks(a, b, seconds=150, near_cm=500):
         return None, {"why": f"no {boss} near A after waking it"}
     target = dragons[0]["name"]
     hp_before = dragons[0].get("hp")
-    log_from = {n: len(kd_log_all(n)) for n in ("A", "B")}
-    for g in (a, b):
-        g.exec("watch start 6000")
-    gaps = []
-    end = time.time() + seconds
-    next_hit = 0.0
-    while time.time() < end:
-        if time.time() >= next_hit:
-            a.exec(f"kd ehit {target} 1")   # last hitter within 6 s owns and targets
-            next_hit = time.time() + 3
-        pa = local_pos(a)
-        # B stands where A stands: the dragon aims at A's feet, so its fire lands where B is too
-        b.exec(f"tp {pa[0] + 20} {pa[1]} {pa[2] + 30} 0")
-        time.sleep(0.6)
-        gaps.append(round(dist(local_pos(b)[:2], local_pos(a)[:2])))
-        b.exec(f"kd elist {boss}")
-        a.exec(f"kd elist {boss}")
-        time.sleep(1.4)
-    for g in (a, b):
-        g.exec("watch stop")
-    wa = a.state(sections=["watch"])["watch"]
-    wb = b.state(sections=["watch"])["watch"]
-    for g in (a, b):
-        g.exec("kd god 0")
-    time.sleep(1)
 
-    def side(w, name):
+    def side(w, name, log_from):
         actors = {}
         for r in w["actors"]:
             if "FX" in r["class"]:   # level effects (waterfall / swamp splashes) match the words but are not attacks
@@ -531,18 +514,55 @@ def area_attacks(a, b, seconds=150, near_cm=500):
         return {"actors": actors, "hits": len(w["health"]["hits"]), "damage": round(w["health"]["damage"]),
                 "hits_by_closest_class": hits_by_class(w, near_cm), "boss_montages": montages, "boss_owners": owners}
 
-    sa, sb = side(wa, "A"), side(wb, "B")
-    after = [e for e in enemies(a) if e["name"] == target]
-    res = {"boss": target, "boss_hp": [hp_before, after[0].get("hp") if after else None], "seconds": seconds,
-           "b_to_a_cm": {"median": sorted(gaps)[len(gaps) // 2] if gaps else None, "max": max(gaps) if gaps else None},
-           "a": sa, "b": sb}
     area_hits = lambda s: sum(v["hits"] for k, v in s["hits_by_closest_class"].items()
                               if any(x in k for x in AREA_WORDS))
-    if area_hits(sa) == 0:
-        return None, {"why": "A was never hit with an area-attack actor close: the boss did not use one on A", **res}
-    b_sees_area = any(v["kind"] == "area" for v in sb["actors"].values())
-    return b_sees_area and area_hits(sb) > 0, res
+    # Puddle hits are rare (one in 150 s on A once, while the flame breath landed 63 times): a round where the boss
+    # barely used its puddles proves nothing either way, so up to three rounds are fought. B passes with one puddle
+    # hit; B taking none while A took several in the same round is a real failure.
+    rounds = []
+    for rnd in range(3):
+        log_from = {n: len(kd_log_all(n)) for n in ("A", "B")}
+        for g in (a, b):
+            g.exec("kd god 1")
+            g.exec("watch start 6000")
+        gaps = []
+        end = time.time() + seconds
+        next_hit = 0.0
+        while time.time() < end:
+            if time.time() >= next_hit:
+                a.exec(f"kd ehit {target} 1")   # last hitter within 6 s owns and targets
+                next_hit = time.time() + 3
+            pa = local_pos(a)
+            # B stands where A stands: the dragon aims at A's feet, so its fire lands where B is too
+            b.exec(f"tp {pa[0] + 20} {pa[1]} {pa[2] + 30} 0")
+            time.sleep(0.6)
+            gaps.append(round(dist(local_pos(b)[:2], local_pos(a)[:2])))
+            b.exec(f"kd elist {boss}")
+            a.exec(f"kd elist {boss}")
+            time.sleep(1.4)
+        for g in (a, b):
+            g.exec("watch stop")
+        wa = a.state(sections=["watch"])["watch"]
+        wb = b.state(sections=["watch"])["watch"]
+        sa, sb = side(wa, "A", log_from), side(wb, "B", log_from)
+        rounds.append({"round": rnd + 1, "a_area_hits": area_hits(sa), "b_area_hits": area_hits(sb),
+                       "b_to_a_cm": {"median": sorted(gaps)[len(gaps) // 2] if gaps else None,
+                                     "max": max(gaps) if gaps else None}, "a": sa, "b": sb})
+        if area_hits(sb) > 0 or area_hits(sa) >= 3:
+            break
+    for g in (a, b):
+        g.exec("kd god 0")
+    time.sleep(1)
 
+    last = rounds[-1]
+    after = [e for e in enemies(a) if e["name"] == target]
+    res = {"boss": target, "boss_hp": [hp_before, after[0].get("hp") if after else None], "seconds": seconds,
+           "rounds": [{k: v for k, v in r.items() if k not in ("a", "b")} for r in rounds],
+           "b_to_a_cm": last["b_to_a_cm"], "a": last["a"], "b": last["b"]}
+    if not any(r["a_area_hits"] or r["b_area_hits"] for r in rounds):
+        return None, {"why": "no player was hit with an area-attack actor close: the boss did not use one", **res}
+    b_sees_area = any(v["kind"] == "area" for v in last["b"]["actors"].values())
+    return b_sees_area and any(r["b_area_hits"] > 0 for r in rounds), res
 
 def match_enemy(g, en, max_cm=600):
     """The same enemy on another copy (object names differ per copy): same class, nearest position."""
@@ -565,7 +585,7 @@ def delta(x, y):
     return {k: (x.get(k), y.get(k)) for k in set(x) | set(y) if x.get(k) != y.get(k)}
 
 
-def drops_and_xp(a, b, spot=(3000, -2000, 500), kills=10):
+def drops_and_xp(a, b, spot=(3000, -2000, 500), kills=20):
     """A kills a few small enemies (`kd ehit`, B stands 1.5 m behind A). Shared rewards: each enemy dies on both
     copies (both kill counters go up), both get the same XP, and the loot is rolled once: what drops can be picked up
     by one player, after which it is gone for the other. (The 1.0.3 source: every non-owner "kills its own copy and
@@ -575,11 +595,11 @@ def drops_and_xp(a, b, spot=(3000, -2000, 500), kills=10):
     a.exec(f"tp {spot[0]} {spot[1]} {spot[2]} 0")
     time.sleep(3)
     pa = local_pos(a)
-    targets = [e for e in enemies(a) if e.get("hp") and e["hp"] < 200 and dist(e["pos"], pa) < 4000]
+    targets = [e for e in enemies(a) if e.get("hp") and e["hp"] < 200 and dist(e["pos"], pa) < 6000]
     targets.sort(key=lambda e: dist(e["pos"], pa))
     targets = targets[:kills]
     if not targets:
-        return None, {"why": "no small enemy within 40 m of A"}
+        return None, {"why": "no small enemy within 60 m of A"}
 
     def b_behind_a(en_pos):
         # B 1.5 m behind A (away from the enemy), so A stays the nearest player and keeps ownership
@@ -783,6 +803,7 @@ def death(a, b, wait_s=120, spot=(3000, -2000, 500)):
     keys = ("lastCheckpoint", "savePoint")
     b.exec("kd god 1")   # B must not die to whatever is around
     a.exec("kd god 0")
+    a.exec("kd party down 0")   # the game's own death (with B next to A, A would go down instead: see party_scenarios)
     a.exec(f"tp {spot[0]} {spot[1]} {spot[2]} 0")   # away from where a new game starts
     time.sleep(3)
     # A kills the small enemies near the spot first: does the host's reload bring them back, and on whose copy?
@@ -1045,14 +1066,25 @@ def getvar(g, actor, var):
         return None
 
 
+def trap_mode(g, name):
+    """True for the Bridge Lord's dormant decoy, False for a real boss, None if it could not be read. A failed read used
+    to count as "not a decoy", so under load the host's kill step once hit the decoy and the real boss lived on."""
+    for _ in range(3):
+        v = getvar(g, name, "InTrapMode")
+        if v in ("true", "false"):
+            return v == "true"
+        time.sleep(0.5)
+    return None
+
+
 def boss_of(g, cls):
     """This copy's boss of class `cls` (actor names differ per copy): name, dead, hp, plus DeathIsSuspended."""
     found = [e for e in g.state(sections=["enemies"])["enemies"] if cls in e["class"]]
     if not found:
         return None
     for e in found:   # a dormant copy elsewhere (the Bridge Lord's decoy) is not the boss being fought
-        e["trap"] = getvar(g, e["name"], "InTrapMode") == "true"
-    e = sorted(found, key=lambda x: (x["trap"], x["dead"], x["dist"]))[0]
+        e["trap"] = trap_mode(g, e["name"])
+    e = sorted(found, key=lambda x: (x["trap"] is True, x["trap"] is None, x["dead"], x["dist"]))[0]
     e["suspended"] = getvar(g, e["name"], "DeathIsSuspended") == "true"
     return e
 
@@ -1103,12 +1135,23 @@ def fight_half(g, other, cls, seconds, goto_cm=250):
     start = time.time()
     end, hard_end = start + seconds, start + 2 * seconds
     next_goto = 0.0
+    turn, last_drops, quiet_since = 0, 0, time.time()
     while time.time() < hard_end:
         # past `seconds`, keep going only until `g` has been hit (a slow attack cycle can miss a fixed window)
-        if time.time() >= end and g.state(sections=["watch"])["watch"]["health"]["drops"] > 0:
+        drops = g.state(sections=["watch"])["watch"]["health"]["drops"]
+        if time.time() >= end and drops > 0:
             break
+        if drops != last_drops:
+            last_drops, quiet_since = drops, time.time()
+        elif time.time() - quiet_since > 12:
+            # not hit for a while: the boss cannot reach this spot (Grave Guardian: from one side it jumps, misses and
+            # walks back to its shrine), so step round to another side of it, as a player would
+            # (the goto measures from where the player stands, so the turn applies once and the next ones keep that side)
+            turn, quiet_since = 90, time.time()
+            next_goto = 0.0
         if time.time() >= next_goto:
-            g.exec(f"kd egoto {tg} {goto_cm}")
+            g.exec(f"kd egoto {tg} {goto_cm} {turn}")
+            turn = 0
             other.exec(f"kd egoto {to} 2000")   # the other player stands back, so the boss turns to `g`
             next_goto = time.time() + 6
         g.exec(f"kd ehit {tg} 1")
@@ -1137,7 +1180,8 @@ def boss_far(g, cls):
     """The name of this copy's boss of class `cls` wherever it is (the enemy list only covers 60 m around the player):
     a copy not in its dormant trap mode first."""
     found = [x["name"] for x in actors(g, cls) if cls in x["class"] and "Spawner" not in x["class"]]
-    found.sort(key=lambda n: getvar(g, n, "InTrapMode") == "true")
+    trap = {n: trap_mode(g, n) for n in found}
+    found.sort(key=lambda n: (trap[n] is True, trap[n] is None))
     return found[0] if found else None
 
 
@@ -1474,12 +1518,15 @@ def whaleking(a, b):
     res["after_start"] = both(lambda g: boss_of(g, cls), a, b)
     checks["boss_awake_both"] = all(x and not x["trap"] and not x["hidden"] for x in res["after_start"].values())
     res["fight"] = fight(a, b, cls, seconds=90)
-    checks["attacks_hit_b"] = res["fight"]["b_fights"]["b"]["hits"] > 0
-    checks["attacks_hit_a"] = res["fight"]["a_fights"]["a"]["hits"] > 0
     # below half its health: its second phase drains the arena and brings poison
     a.exec(f"kd ehp {cls} 0.45")
     time.sleep(2)
     res["fight_phase2"] = fight(a, b, cls, seconds=60)
+    # it keeps one target for long stretches, so a player may only get its turn in the second phase: count the whole
+    # fight (each player must still be hit at some point)
+    hits = lambda who: res["fight"][f"{who}_fights"][who]["hits"] + res["fight_phase2"][f"{who}_fights"][who]["hits"]
+    checks["attacks_hit_b"] = hits("b") > 0
+    checks["attacks_hit_a"] = hits("a") > 0
     res["calls_sent"], res["calls_run"] = calls_follow(log_from, ("DrainWater", "RefillWater", "RemovePoison",
                                                                    "KillPoisonCircles", "DoHornBreak"))
     checks["arena_changes_follow"] = sorted(res["calls_sent"]) == sorted(res["calls_run"])
@@ -1707,7 +1754,9 @@ def ros_dragon(a, b):
     def extra(a, b, res, checks):
         sent, ran = calls_between(log_from, "B", "A", ("Activate",))
         res["activate"] = {"sent_by_client": sent, "ran_on_host": ran}
-        checks["start_follows"] = bool(sent) and len(ran) == len(sent)
+        # the client's start must run on the host; later Activates fire on both copies by themselves (the players walk
+        # through the spawner's trigger at the same moment) and the host rightly skips the client's echo of those
+        checks["start_follows"] = bool(sent) and len(ran) >= 1
 
     return boss_encounter(a, b, "Dragon_Ros", "ROSDragon_Spawner", (3549, 9691, -6080),
                           ("b", "activate ROSDragon_Spawner"), "ROS", flags=("ROSDragonDead",),
@@ -2163,11 +2212,21 @@ def pot_loot(a, b, spot=(3000, -2000, 500), tries=25):
         except Exception:
             continue
         time.sleep(5)
-        after_a, after_b = near(a), near(b)
+        after_a = near(a)
         new_a = [c for c in after_a if c not in before_a or after_a.count(c) > before_a.count(c)]
-        new_b = [c for c in after_b if c not in before_b or after_b.count(c) > before_b.count(c)]
-        rows.append({"pot": n, "a_new": new_a, "b_new": new_b, "b_pot_hidden": not any(
-            q["name"] == n for q in find(b, "Pot_Base", 2000) if dist(q["pos"], pt["pos"]) < 50)})
+        new_b = []
+        for _ in range(6 if new_a else 1):   # B's copy can land a moment later: poll before calling it missing
+            after_b = near(b)
+            new_b = [c for c in after_b if c not in before_b or after_b.count(c) > before_b.count(c)]
+            if sorted(new_b) == sorted(new_a):
+                break
+            time.sleep(1)
+        row = {"pot": n, "a_new": new_a, "b_new": new_b, "b_pot_hidden": not any(
+            q["name"] == n for q in find(b, "Pot_Base", 2000) if dist(q["pos"], pt["pos"]) < 50)}
+        if new_a and sorted(new_b) != sorted(new_a):   # where did B's copy go?
+            row["b_same_class_cm"] = sorted(int(dist(p["pos"], pt["pos"])) for p in b.state(sections=["pickups"])["pickups"]
+                                            if p["class"] in new_a and not p["hidden"])[:5]
+        rows.append(row)
         if new_a:
             break
     if not rows or not rows[-1]["a_new"]:
@@ -2196,7 +2255,10 @@ SUITES["b3"] = [["ros_dragon"], ["josami_des"], ["royal_duo"], ["black_robot_duo
 SUITES["b4"] = [["demon_duo"], ["bridge_lord"], ["blood_lords"], ["mecha_knights"], ["queen"], ["sipeha"]]
 SUITES["b5"] = [["boss_reset_guard"], ["arena_pull_in"]]
 SUITES["laneb"] = SUITES["b1"] + SUITES["b2"] + SUITES["b3"] + SUITES["b4"] + SUITES["b5"]
-SUITES["all"] = SUITES["lane1"] + SUITES["lane2"] + SUITES["laneA"] + SUITES["laneb"]
+import party_scenarios  # noqa: E402
+SCENARIOS.update(party_scenarios.SCENARIOS)
+SUITES["party"] = party_scenarios.SUITE
+SUITES["all"] = SUITES["lane1"] + SUITES["lane2"] + SUITES["laneA"] + SUITES["laneb"] + SUITES["party"]
 
 
 RESULTS_PATH = None   # set by main: the run's results file, rewritten after every scenario
@@ -2209,43 +2271,104 @@ def save_results(results):
 
 
 def run(names, results):
-    if names == ["lag"]:   # lag boots its own pairs (7 reboots, about 18 min)
+    if names == ["lag"]:   # lag boots its own pairs (7 of them)
+        t = time.time()
         ok, info = lag(None, None)
-        results["lag"] = {"result": "PASS" if ok else "FAIL", **info}
+        results["lag"] = {"result": "PASS" if ok else "FAIL", "seconds": round(time.time() - t), **info}
         return
     a, b = rig.connect("A"), rig.connect("B")
     for n in names:
+        t = time.time()
         try:
             ok, info = SCENARIOS[n](a, b)
         except Exception as e:  # report and keep going
             ok, info = False, {"error": repr(e)}
         verdict = "SKIP" if ok is None else "PASS" if ok else "FAIL"
-        results[n] = {"result": verdict, **info}
+        results[n] = {"result": verdict, "seconds": round(time.time() - t), **info}
         save_results(results)   # a crash or a power cut keeps what ran so far
-        print(f"{n:24s} {verdict}  {json.dumps(info)[:400]}", flush=True)
+        print(f"{n:24s} {verdict}  {results[n]['seconds']:4d}s  {json.dumps(info)[:400]}", flush=True)
         if n == "rejoin" or n.endswith("_persists"):   # these replace a copy: reconnect
             a, b = rig.connect("A"), rig.connect("B")
+
+
+def pick_groups(groups, only=None, rerun=None):
+    """The suite's groups cut down to `only` (names) or to what did not pass in an earlier results file (`rerun`).
+    A group keeps its order, so a scenario still runs after the ones it depends on in its group (the gate first)."""
+    keep = set(only or [])
+    if rerun:
+        old = json.load(open(rerun, encoding="utf-8"))
+        keep |= {n for n, r in old.items() if r.get("result") != "PASS"}
+    if not only and not rerun:
+        return groups
+    return [[n for n in g if n in keep] for g in groups if any(n in keep for n in g)]
+
+
+def pair_alive():
+    """The pair from an earlier run is still up and connected (for --reuse)."""
+    try:
+        return rig.connected(rig.connect("A", wait_s=2), rig.connect("B", wait_s=2))
+    except Exception:
+        return False
+
+
+USAGE = """usage: scenarios.py [name ...] | --suite <name> [--only a,b,...] [--rerun results.json] [--reuse] [--keep]
+  --only    run just these scenarios of the suite (each with its group's fresh pair)
+  --rerun   run what did not PASS in an earlier results file (results/<time>.json)
+  --reuse   the first group runs on the pair that is already up (when it is connected) instead of a fresh one
+  --keep    leave the last pair running at the end (for --reuse next time)
+suites: """
 
 
 def main(argv):
     global RESULTS_PATH
     results = {}
+    if argv and argv[0] in ("-h", "--help"):
+        sys.exit(USAGE + ", ".join(SUITES))
+
+    def opt(flag):
+        return argv[argv.index(flag) + 1] if flag in argv else None
     RESULTS_PATH = os.path.join(rig.LAB, "results", time.strftime("%Y%m%d-%H%M%S") + ".json")
     os.makedirs(os.path.dirname(RESULTS_PATH), exist_ok=True)
     print("results go to", RESULTS_PATH, flush=True)
+    t_all = time.time()
+    boot_s = 0
     if argv and argv[0] == "--suite":
-        for group in SUITES[argv[1]]:
-            rig.qdlab.stop()
-            time.sleep(3)
-            rig.boot("A", "host")
-            rig.boot("B", "join")
-            time.sleep(10)
+        only = opt("--only").split(",") if opt("--only") else None
+        groups = pick_groups(SUITES[argv[1]], only, opt("--rerun"))
+        reuse = "--reuse" in argv and pair_alive()
+        for gi, group in enumerate(groups):
+            if group == ["lag"]:
+                run(group, results)
+                continue
+            if not (gi == 0 and reuse):
+                t = time.time()
+                err = None
+                for attempt in range(3):   # a copy can hang while loading (the PC is short of memory): boot again
+                    rig.qdlab.stop()
+                    rig.stop_relay()
+                    try:
+                        rig.fast_pair()
+                        err = None
+                        break
+                    except Exception as e:
+                        err = e
+                        rig.log(f"pair boot failed ({e!r}), attempt {attempt + 1} of 3")
+                boot_s += time.time() - t
+                if err:
+                    for n in group:
+                        results[n] = {"result": "FAIL", "error": f"the pair did not boot: {err!r}"}
+                        print(f"{n:24s} FAIL  the pair did not boot", flush=True)
+                    save_results(results)
+                    continue
             run(group, results)
-        rig.qdlab.stop()
+        if "--keep" not in argv:
+            rig.qdlab.stop()
     else:
         run(argv or [n for n in SCENARIOS if n != "lag"], results)
     save_results(results)
+    total = time.time() - t_all
     print("SUMMARY", json.dumps({n: r["result"] for n, r in results.items()}))
+    print(f"TIME {total / 60:.1f} min, of which booting pairs {boot_s / 60:.1f} min")
     print("saved", RESULTS_PATH)
 
 

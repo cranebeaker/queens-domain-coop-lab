@@ -71,35 +71,117 @@ def mod_args(name, role, join_port=None):
     return args
 
 
-def boot(name, role=None, slot=0, load=False, join_port=None):
+def start(name, role=None, join_port=None, load=False):
+    """Launch a copy with the bridge and wait for its title screen; returns the bridge connection. role "later" is a
+    client that joins only when told (`join`), so both copies can boot at the same time."""
     if not load:
         # a new game in a used slot keeps parts of the old world: start every test from an empty save folder
         # (the copy's own Saved, never the owner's)
         saves = os.path.join(qdlab.COPIES, name, "QueensDomain", "Saved", "SaveGames")
         if os.path.isdir(saves):
             shutil.rmtree(saves)
-    pid = qdlab.launch(name, mod_args(name, role, join_port))
+    pid = qdlab.launch(name, mod_args(name, None if role == "later" else role, join_port))
     log(f"{name}: launched pid {pid}")
-    time.sleep(8)
+    time.sleep(5)   # the loader needs the process past its own start before LoadLibrary
     dll = os.path.join(qdlab.COPIES, name, "qdbridge.dll")   # inject a copy so the build output never stays locked
     shutil.copyfile(BRIDGE_DLL, dll)
     qdlab.inject(pid, dll)
     g = connect(name)
-    wait_until(lambda: g.eval("title") is True, 120, what=f"{name} title screen")
+    wait_until(lambda: g.eval("title") is True, 120, step=0.5, what=f"{name} title screen")
+    return g
+
+
+def enter(g, name, slot=0, load=False):
+    """From the title screen into the world (a new game or a saved slot); the beach intro is skipped."""
     time.sleep(4)   # the title screen must settle before a new game (see games/queens-domain NOTES in the hub)
     g.exec(f"{'loadslot' if load else 'newgame'} {slot}")
     log(f"{name}: {'loaded' if load else 'new game in'} slot {slot}")
     g.close()
     g = connect(name, wait_s=120)
-    wait_until(lambda: g.eval("inworld") is True, 240, step=2, what=f"{name} in world")
-    for _ in range(20):   # the beach intro can start a few seconds after the world appears
-        try:
-            g.exec("skipintro")
-        except Exception:
-            pass
-        time.sleep(1)
+    wait_until(lambda: g.eval("inworld") is True, 240, step=1, what=f"{name} in world")
+    skip_intro(g, expect=not load)
     log(f"{name}: in world {g.eval('world')}")
     return g
+
+
+def skip_intro(g, expect=True, max_s=20):
+    """The beach intro can start a few seconds after the world appears: skip it as soon as it runs and stop once it
+    is over (a loaded save has none: then a short look is enough)."""
+    end = time.time() + (max_s if expect else 4)
+    seen = False
+    while time.time() < end:
+        try:
+            p = g.state(sections=["player"])["player"]
+            if p.get("intro"):
+                seen = True
+                g.exec("skipintro")
+            elif seen and p.get("present"):
+                time.sleep(1)   # the skip ends the intro a frame later: one more look
+                if not g.state(sections=["player"])["player"].get("intro"):
+                    return
+        except Exception:
+            pass
+        time.sleep(0.5)
+
+
+def boot(name, role=None, slot=0, load=False, join_port=None):
+    return enter(start(name, role, join_port, load), name, slot, load)
+
+
+def join(g, name, port=None, wait_s=60):
+    """Tell a copy started with role "later" to join the host; the mod only takes it once its session is up."""
+    target = f"127.0.0.1:{port or KD_UDP_PORT}"
+    end = time.time() + wait_s
+    mark = len(kd_log(name, 100000))
+    while time.time() < end:
+        g.exec(f"kd join {target}")
+        time.sleep(1.5)
+        lines = kd_log(name, 100000)[mark:]
+        if any("join sent" in x for x in lines):
+            log(f"{name}: joining {target}")
+            return True
+        if any("join not possible" in x for x in lines):
+            mark = len(kd_log(name, 100000))
+        time.sleep(1)
+    raise TimeoutError(f"{name} could not join {target}")
+
+
+def connected(a, b):
+    """Each copy shows the other player's puppet."""
+    try:
+        return bool(a.state(sections=["puppets"])["puppets"]) and bool(b.state(sections=["puppets"])["puppets"])
+    except Exception:
+        return False
+
+
+def fast_pair(lag=False):
+    """A hosts, B joins: both copies boot at the same time, B joins from its title screen once A is in its world (the
+    same order as booting B after A) and the two new games load side by side. About 40 s instead of 110 s."""
+    import threading
+    t0 = time.time()
+    conns, errs = {}, {}
+
+    def go(n, role):
+        try:
+            conns[n] = start(n, role)
+        except Exception as e:
+            errs[n] = e
+    ts = [threading.Thread(target=go, args=("A", "host")), threading.Thread(target=go, args=("B", "later"))]
+    for t in ts:
+        t.start()
+        time.sleep(1)   # launch() places windows and hands focus back: one at a time
+    for t in ts:
+        t.join()
+    if errs:
+        raise RuntimeError(f"boot failed: {errs}")
+    a = enter(conns["A"], "A")
+    port = start_relay() if lag else None
+    join(conns["B"], "B", port)
+    b = enter(conns["B"], "B")
+    wait_until(lambda: connected(a, b), 60, step=0.5, what="A and B see each other")
+    time.sleep(2)
+    log(f"pair ready in {time.time() - t0:.0f} s")
+    return a, b
 
 
 def chaos_call(method, params="{}"):
@@ -140,10 +222,7 @@ def stop_relay():
 
 
 def pair(lag=False):
-    a = boot("A", "host")
-    b = boot("B", "join", join_port=start_relay() if lag else None)
-    time.sleep(10)
-    return a, b
+    return fast_pair(lag)
 
 
 def kd_log(name, lines=30):

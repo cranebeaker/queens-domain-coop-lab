@@ -176,6 +176,10 @@ Value PlayerState() {
     v.set("health", p->Health);
     v.set("dead", static_cast<bool>(p->IsDead));
     v.set("cutscene", p->CurrentCutsceneManager ? ObjName(p->CurrentCutsceneManager) : std::string());
+    v.set("resting", static_cast<bool>(p->Resting));
+    v.set("intro", static_cast<bool>(p->InIntroCutscene));
+    if (auto* pc = static_cast<SDK::APlayerController*>(p->Controller); pc && pc->IsA(SDK::APlayerController::StaticClass()))
+        v.set("cursor", static_cast<bool>(pc->bShowMouseCursor));
     return v;
 }
 
@@ -243,6 +247,12 @@ Value EnemyState(double radiusCm, bool includeHidden = false) {
         ev.set("dead", static_cast<bool>(e->bDead));
         ev.set("aiDisabled", static_cast<bool>(e->bIsAIDisabled));
         ev.set("hidden", static_cast<bool>(e->bHidden));
+        if (auto* cm = e->CharacterMovement; cm) {   // why an enemy stands still: no walking mode, no speed, no controller
+            ev.set("move", static_cast<int>(cm->MovementMode));
+            ev.set("speed", std::round(std::sqrt(cm->Velocity.X * cm->Velocity.X + cm->Velocity.Y * cm->Velocity.Y)));
+            ev.set("maxWalk", std::round(cm->MaxWalkSpeed));
+        }
+        ev.set("controller", e->Controller ? ObjName(e->Controller) : std::string());
         if (bp && e->IsA(bp)) ev.set("hp", static_cast<SDK::AEnemyBase_C*>(e)->HP);
         list.push(ev);
     }
@@ -969,15 +979,21 @@ public:
             std::string match; in >> match;
             std::map<std::string, int> seen;
             std::string fns;
+            int inView = 0;
             for (auto* w : WidgetsMatching(match)) {
                 ++seen[ObjName(w->Class)];
+                if (SDK::UFunction* iv = FindFn(w, "IsInViewport")) {
+                    alignas(16) unsigned char vb[64] = {};
+                    w->ProcessEvent(iv, vb);
+                    if (vb[0]) ++inView;
+                }
                 if (!match.empty() && fns.empty())
                     for (SDK::UField* f = w->Class->Children; f; f = f->Next)
                         if (f->IsA(SDK::UFunction::StaticClass())) fns += ObjName(f) + " ";
             }
             std::string txt;
             for (auto& [k, n] : seen) txt += k + "x" + std::to_string(n) + " ";
-            return {true, txt + (fns.empty() ? "" : "| functions: " + fns)};
+            return {true, txt + "inviewport=" + std::to_string(inView) + " " + (fns.empty() ? "" : "| functions: " + fns)};
         }
         if (cmd == "uicall") {   // uicall <widget class match> <function>: call a no-parameter function on it
             std::string match, fn; in >> match >> fn;
