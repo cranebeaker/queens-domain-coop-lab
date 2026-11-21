@@ -60,6 +60,21 @@ def side_by_side(a, b, dx=150):
     time.sleep(3)
 
 
+def clear_near(a, radius=3000):
+    """Kill the enemies within `radius` of A: a revive stops when the reviver takes a hit (god mode only keeps the
+    health from running out), and roaming enemies reach this spot in some runs."""
+    sc = _sc()
+    pa = sc.local_pos(a)
+    for _ in range(3):
+        near = [e for e in sc.enemies(a) if sc.dist(e["pos"], pa) < radius]
+        if not near:
+            return 0
+        for e in near:
+            safe(lambda: a.exec(f"kd ehit {e['name']} 4000"))
+        time.sleep(2)
+    return len([e for e in sc.enemies(a) if sc.dist(e["pos"], pa) < radius])
+
+
 def revive(a, b):
     """A runs out of health next to B: A goes down instead of dying (B sees A lying, A takes no damage and cannot
     act), B holds Interact next to A and A stands up at 35 % health. Then the team wipe: A goes down again and B dies
@@ -73,7 +88,7 @@ def revive(a, b):
     a.exec(f"tp {FAR_SPOT[0]} {FAR_SPOT[1]} {FAR_SPOT[2]} 0")
     time.sleep(3)
     side_by_side(a, b)
-    res = {}
+    res = {"enemies_left_near": clear_near(a)}
     a.exec("die")
     down_s = wait_for(lambda: pstate(a, "A").get("localDowned"), 10)
     res["a_down_after_s"] = down_s
