@@ -1069,7 +1069,8 @@ public:
         if (want("save")) v.set("save", SaveState());
         if (want("enemies")) v.set("enemies", EnemyState(6000));
         if (want("players")) v.set("players", PlayersState());
-        if (want("pickups")) v.set("pickups", PickupsState(6000));
+        // 200 m: a scenario spreads its kills over up to 120 m, and both copies must list the same drops
+        if (want("pickups")) v.set("pickups", PickupsState(20000));
         if (want("puppets")) v.set("puppets", PuppetsState());
         if (want("savables")) v.set("savables", SavablesState(6000, false));
         if (!sections.empty() && want("savables_all")) v.set("savables_all", SavablesState(0, false));
