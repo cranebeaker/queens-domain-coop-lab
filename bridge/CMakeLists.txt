@@ -16,4 +16,4 @@ add_library(qdbridge SHARED
     ${QD_SDK}/SDK/CoreUObject_functions.cpp
     ${QD_SDK}/SDK/Engine_functions.cpp)
 target_include_directories(qdbridge PRIVATE ${QD_SDK} ${COOPBRIDGE})
-target_link_libraries(qdbridge PRIVATE ws2_32 user32)
+target_link_libraries(qdbridge PRIVATE ws2_32 user32 dbghelp)

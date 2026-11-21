@@ -28,6 +28,8 @@
 #include <coopbridge/server.h>
 
 #include <Windows.h>
+#include <DbgHelp.h>
+#include <TlHelp32.h>
 
 #include <atomic>
 #include <cctype>
@@ -148,6 +150,8 @@ std::wstring KdDevCmdPath() {
     if (profile >= 2) d += L"\\DevProfile" + std::to_wstring(profile);
     return d + L"\\devcmd.txt";
 }
+
+void WriteHangStacks(const std::wstring& path);
 
 // ------------------------------------------------------------------ state
 
@@ -1039,6 +1043,14 @@ public:
     Value Eval(const std::string& expr, const std::string&) override {
         if (expr == "world") return World() ? ObjName(World()) : std::string("none");
         if (expr == "title") return FirstInstance<SDK::UTitleScreenUI_C>() != nullptr;
+        if (expr == "stackreport") {   // the hang watchdog's text report, on demand (to check it works)
+            std::wstring dir = KdDevCmdPath();
+            static std::wstring path;
+            path = dir.substr(0, dir.find_last_of(L'\\')) + L"\\stacks_now.txt";
+            HANDLE t = CreateThread(nullptr, 0, [](LPVOID) -> DWORD { WriteHangStacks(path); return 0; }, nullptr, 0, nullptr);
+            if (t) { WaitForSingleObject(t, 30000); CloseHandle(t); }
+            return true;
+        }
         if (expr == "loading") { auto* gi = GameInstance(); return gi ? static_cast<bool>(gi->bLoadingMap) : true; }
         if (expr == "inworld") { auto* gi = GameInstance(); return Player() != nullptr && gi && !gi->bLoadingMap; }
         if (expr == "health") { auto* p = Player(); return p ? Value(p->Health) : Value(); }
@@ -1142,6 +1154,76 @@ DWORD FindGameThread() {
     return tid;
 }
 
+// Every thread's call stack as text (game thread first). Each thread is paused only while its return addresses are
+// read with the unwinder (no allocation, so a paused thread holding the heap lock cannot block us); names come after.
+void WriteHangStacks(const std::wstring& path) {
+    std::vector<DWORD> tids;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snap == INVALID_HANDLE_VALUE) return;
+    THREADENTRY32 te{sizeof(te)};
+    for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te))
+        if (te.th32OwnerProcessID == GetCurrentProcessId() && te.th32ThreadID != GetCurrentThreadId()) tids.push_back(te.th32ThreadID);
+    CloseHandle(snap);
+    std::stable_partition(tids.begin(), tids.end(), [](DWORD t) { return t == g_gameThread; });
+    struct Stack { DWORD tid; std::vector<DWORD64> pcs; };
+    std::vector<Stack> stacks;
+    for (DWORD tid : tids) {
+        HANDLE th = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, tid);
+        if (!th) continue;
+        Stack s{tid, {}};
+        s.pcs.reserve(64);
+        if (SuspendThread(th) != static_cast<DWORD>(-1)) {
+            CONTEXT c{};
+            c.ContextFlags = CONTEXT_FULL;
+            if (GetThreadContext(th, &c)) {
+                for (int i = 0; i < 64 && c.Rip; ++i) {
+                    s.pcs.push_back(c.Rip);
+                    DWORD64 base = 0;
+                    PRUNTIME_FUNCTION fe = RtlLookupFunctionEntry(c.Rip, &base, nullptr);
+                    if (!fe) { c.Rip = *reinterpret_cast<DWORD64*>(c.Rsp); c.Rsp += 8; continue; }   // leaf
+                    void* hd = nullptr;
+                    DWORD64 est = 0;
+                    RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, c.Rip, fe, &c, &hd, &est, nullptr);
+                }
+            }
+            ResumeThread(th);
+        }
+        CloseHandle(th);
+        stacks.push_back(std::move(s));
+    }
+    HANDLE proc = GetCurrentProcess();
+    SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
+    SymInitializeW(proc, nullptr, TRUE);
+    std::ofstream out(path);
+    alignas(SYMBOL_INFO) char buf[sizeof(SYMBOL_INFO) + 512];
+    for (const auto& s : stacks) {
+        out << "thread " << s.tid << (s.tid == g_gameThread ? " (game thread)" : "") << "\n";
+        for (DWORD64 pc : s.pcs) {
+            HMODULE m = nullptr;
+            char mod[MAX_PATH] = "?";
+            if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   reinterpret_cast<LPCSTR>(pc), &m)) {
+                char full[MAX_PATH];
+                if (GetModuleFileNameA(m, full, MAX_PATH)) { const char* b = strrchr(full, '\\'); strcpy_s(mod, b ? b + 1 : full); }
+            }
+            out << "  " << mod << "+0x" << std::hex << (pc - reinterpret_cast<DWORD64>(m)) << std::dec;
+            auto* sym = reinterpret_cast<SYMBOL_INFO*>(buf);
+            sym->SizeOfStruct = sizeof(SYMBOL_INFO);
+            sym->MaxNameLen = 511;
+            DWORD64 disp = 0;
+            if (SymFromAddr(proc, pc, &disp, sym)) out << "  " << sym->Name << "+0x" << std::hex << disp << std::dec;
+            IMAGEHLP_LINE64 ln{sizeof(ln)};
+            DWORD ld = 0;
+            if (SymGetLineFromAddr64(proc, pc, &ld, &ln)) {
+                const char* b = strrchr(ln.FileName, '\\');
+                out << "  (" << (b ? b + 1 : ln.FileName) << ":" << ln.LineNumber << ")";
+            }
+            out << "\n";
+        }
+    }
+    SymCleanup(proc);
+}
+
 void Main() {
     for (int i = 0; i < 600 && !g_gameThread; ++i) { g_gameThread = FindGameThread(); if (!g_gameThread) Sleep(100); }
     if (!g_gameThread) return;
@@ -1152,6 +1234,33 @@ void Main() {
     opt.build = "qdbridge-0.1";
     opt.tcpPort = ArgInt(L"-qdbridge-port=", 27990);
     if (!g_server.Start(opt, g_adapter)) return;
+    // Hang watchdog: when the game thread stops pumping for 20 s (after the hooks are in), write one minidump with
+    // every thread's stack next to the mod's log, so a freeze in a test run can be read afterwards. Up to 3 a run.
+    CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
+        int written = 0;
+        bool armed = true;
+        while (written < 3) {
+            Sleep(1000);
+            if (g_vhookCount == 0 || g_lastPump == 0) continue;
+            const ULONGLONG idle = GetTickCount64() - g_lastPump;
+            if (idle < 5000) { armed = true; continue; }
+            if (!armed || idle < 20000) continue;
+            armed = false;
+            std::wstring dir = KdDevCmdPath();
+            dir = dir.substr(0, dir.find_last_of(L'\\'));
+            const std::wstring path = dir + L"\\hang_" + std::to_wstring(GetTickCount64()) + L".dmp";
+            HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (f == INVALID_HANDLE_VALUE) continue;
+            MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), f,
+                              static_cast<MINIDUMP_TYPE>(MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules |
+                                                         MiniDumpWithIndirectlyReferencedMemory),
+                              nullptr, nullptr, nullptr);
+            CloseHandle(f);
+            WriteHangStacks(path.substr(0, path.size() - 4) + L".txt");
+            ++written;
+        }
+        return 0;
+    }, nullptr, 0, nullptr);
     while (g_run) {
         PostThreadMessageW(g_gameThread, WM_NULL, kPumpMarker, 0);
         Sleep(16);

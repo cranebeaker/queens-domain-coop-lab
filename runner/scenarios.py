@@ -1115,6 +1115,8 @@ def ensure_boss(a, b, cls, spawner, wait_s=20):
     on the host, which decides spawns for everyone."""
     def here(g):   # hidden too: some bosses stay hidden until their intro (the Whaleking)
         return any(cls in x["class"] and "Spawner" not in x["class"] for x in actors(g, cls))
+    if not here(a) and getvar(a, spawner, "SpawnOnActivate") == "true":
+        return True   # the fight's start spawns it; a forced respawn first would make a second boss on the host
     if not here(a):
         a.exec(f"callon {spawner} Force Respawn")
     end = time.time() + wait_s
@@ -1895,9 +1897,14 @@ def bridge_lord(a, b):
     have BridgeLordDead and the doors open on both."""
     def extra(a, b, res, checks):
         res["loot"] = None
+        # its spawner spawns the boss on Activate (no pre-spawn here: a forced respawn first made a second, real
+        # Bridge Lord on the host); exactly one awake Bridge Lord on each copy
+        res["awake"] = both(lambda g: len([x for x in actors(g, "JosamiLord_BP") if "Spawner" not in x["class"]
+                                           and trap_mode(g, x["name"]) is False]), a, b)
+        checks["one_boss_each"] = res["awake"] == {"a": 1, "b": 1}
     ok, res = boss_encounter(a, b, "JosamiLord_BP", "JosamiLord_Spawner_2", (-51820, -17253, -32050),
                              ("b", "activate JosamiLord_Spawner_2"), "loc:Castle_Teleporter", door_vars=("FrontDoor", "RearDoor", "Front", "Rear"),
-                             open_after=False, extra=extra)
+                             spawn_first=False, open_after=False, extra=extra)
     if ok is None:
         return ok, res
     checks = res["checks"]
