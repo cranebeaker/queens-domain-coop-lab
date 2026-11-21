@@ -491,7 +491,16 @@ def area_attacks(a, b, seconds=150, near_cm=500):
     time.sleep(1.5)
     a.exec("tp -28574 754 -12500 0")   # the boss arena (the dragon sleeps here in trap mode until woken)
     time.sleep(3)
-    a.exec(f"kd egoto {boss} 1200")
+    def west_of_dragon():
+        # A 12 m west of the dragon, so its rushes run into the open west half of the arena: rushing east it can end
+        # at the arena's east edge and stand there for good, solo as well
+        d = [e for e in enemies(a) if boss in e["class"]]
+        if d:
+            x, y, z = d[0]["pos"]
+            a.exec(f"tp {x - 1200} {y} {z + 20} 0")
+        else:
+            a.exec(f"kd egoto {boss} 1200")
+    west_of_dragon()
     time.sleep(2)
     a.exec(f"kd ewake {boss}")
     time.sleep(4)
@@ -529,10 +538,19 @@ def area_attacks(a, b, seconds=150, near_cm=500):
         gaps = []
         end = time.time() + seconds
         next_hit = 0.0
+        # the dragon can stand idle for good after a rush, solo as well (4 solo fights: idle 69 s and 85 s in two):
+        # it wants to take off (FOrceGoToAir) and its flight query around a player who stands still keeps failing.
+        # A player keeps moving: A goes to the next open spot of the arena every 25 s (spots where it fought well)
+        spots = [(-29746, 813), (-30063, 3091), (-28747, 2572)]
+        next_go = time.time() + 25
         while time.time() < end:
             if time.time() >= next_hit:
                 a.exec(f"kd ehit {target} 1")   # last hitter within 6 s owns and targets
                 next_hit = time.time() + 3
+            if time.time() >= next_go:
+                sx, sy = spots[int(time.time() // 25) % len(spots)]
+                a.exec(f"tp {sx} {sy} -13008 0")
+                next_go = time.time() + 25
             pa = local_pos(a)
             # B stands where A stands: the dragon aims at A's feet, so its fire lands where B is too
             b.exec(f"tp {pa[0] + 20} {pa[1]} {pa[2] + 30} 0")
