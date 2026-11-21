@@ -1921,7 +1921,10 @@ def bridge_lord(a, b):
         res["awake"] = both(lambda g: len([x for x in actors(g, "JosamiLord_BP") if "Spawner" not in x["class"]
                                            and trap_mode(g, x["name"]) is False]), a, b)
         checks["one_boss_each"] = res["awake"] == {"a": 1, "b": 1}
-    ok, res = boss_encounter(a, b, "JosamiLord_BP", "JosamiLord_Spawner_2", (-51820, -17253, -32050),
+    # both players on the bridge deck, where a player stands when the fight starts: started from the teleporter
+    # platform 70 m above, the host's boss missed the deck while climbing onto it in 1 of 8 starts and fell out of
+    # the world (0 of 10 from the deck)
+    ok, res = boss_encounter(a, b, "JosamiLord_BP", "JosamiLord_Spawner_2", (-52500, -19000, -38450),
                              ("b", "activate JosamiLord_Spawner_2"), "loc:Castle_Teleporter", door_vars=("FrontDoor", "RearDoor", "Front", "Rear"),
                              spawn_first=False, open_after=False, extra=extra)
     if ok is None:
