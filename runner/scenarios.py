@@ -530,6 +530,7 @@ def area_attacks(a, b, seconds=150, near_cm=500):
     # hit; B taking none in all three rounds is a real failure (one round with A on 4 area hits and B on none was
     # chance: B stands up to 4 m off A between teleports, and a fireball blast is over in a moment).
     rounds = []
+    respawns = []
     for rnd in range(3):
         log_from = {n: len(kd_log_all(n)) for n in ("A", "B")}
         for g in (a, b):
@@ -543,6 +544,9 @@ def area_attacks(a, b, seconds=150, near_cm=500):
         # A player keeps moving: A goes to the next open spot of the arena every 25 s (spots where it fought well)
         spots = [(-29746, 813), (-30063, 3091), (-28747, 2572)]
         next_go = time.time() + 25
+        # moving does not always bring it back (its flight query can stop for good): idle 30 s in one spot, it is
+        # respawned from its spawner and woken again, a fresh dragon that fights at once
+        idle_since, idle_key = None, None
         while time.time() < end:
             if time.time() >= next_hit:
                 a.exec(f"kd ehit {target} 1")   # last hitter within 6 s owns and targets
@@ -559,6 +563,24 @@ def area_attacks(a, b, seconds=150, near_cm=500):
             b.exec(f"kd elist {boss}")
             a.exec(f"kd elist {boss}")
             time.sleep(1.4)
+            row = next((l for l in reversed(kd_log_all("A")[-30:]) if "[edbg] E " in l and boss in l), None)
+            if row:
+                f = dict(x.split("=", 1) for x in row.split() if "=" in x)
+                key = (f.get("pos"), f.get("hp"))
+                if f.get("state") == "0" and f.get("montage") == "-" and key[0] == (idle_key or (None,))[0]:
+                    if time.time() - idle_since >= 30:
+                        a.exec("callon GreenDragon_Spawner_2 Force Respawn")
+                        time.sleep(6)
+                        a.exec(f"kd ewake {boss}")
+                        time.sleep(4)
+                        fresh = [e for e in enemies(a) if boss in e["class"]]
+                        if fresh:
+                            target = fresh[0]["name"]
+                        respawns.append({"round": rnd + 1, "dragons": both(
+                            lambda g: len([e for e in enemies(g) if boss in e["class"]]), a, b)})
+                        idle_since, idle_key = None, None
+                else:
+                    idle_since, idle_key = time.time(), key
         for g in (a, b):
             g.exec("watch stop")
         wa = a.state(sections=["watch"])["watch"]
@@ -577,11 +599,12 @@ def area_attacks(a, b, seconds=150, near_cm=500):
     after = [e for e in enemies(a) if e["name"] == target]
     res = {"boss": target, "boss_hp": [hp_before, after[0].get("hp") if after else None], "seconds": seconds,
            "rounds": [{k: v for k, v in r.items() if k not in ("a", "b")} for r in rounds],
-           "b_to_a_cm": last["b_to_a_cm"], "a": last["a"], "b": last["b"]}
+           "b_to_a_cm": last["b_to_a_cm"], "a": last["a"], "b": last["b"], "respawns": respawns}
     if not any(r["a_area_hits"] or r["b_area_hits"] for r in rounds):
         return None, {"why": "no player was hit with an area-attack actor close: the boss did not use one", **res}
     b_sees_area = any(v["kind"] == "area" for v in last["b"]["actors"].values())
-    return b_sees_area and any(r["b_area_hits"] > 0 for r in rounds), res
+    one_each = all(r["dragons"] == {"a": 1, "b": 1} for r in respawns)   # a respawn leaves one dragon on each copy
+    return b_sees_area and one_each and any(r["b_area_hits"] > 0 for r in rounds), res
 
 def match_enemy(g, en, max_cm=600):
     """The same enemy on another copy (object names differ per copy): same class, nearest position."""
@@ -2287,7 +2310,10 @@ SUITES["laneb"] = SUITES["b1"] + SUITES["b2"] + SUITES["b3"] + SUITES["b4"] + SU
 import party_scenarios  # noqa: E402
 SCENARIOS.update(party_scenarios.SCENARIOS)
 SUITES["party"] = party_scenarios.SUITE
-SUITES["all"] = SUITES["lane1"] + SUITES["lane2"] + SUITES["laneA"] + SUITES["laneb"] + SUITES["party"]
+import targeting_scenarios  # noqa: E402
+SCENARIOS.update(targeting_scenarios.SCENARIOS)
+SUITES["targeting"] = targeting_scenarios.SUITE
+SUITES["all"] = SUITES["lane1"] + SUITES["lane2"] + SUITES["laneA"] + SUITES["laneb"] + SUITES["party"] + SUITES["targeting"]
 
 
 RESULTS_PATH = None   # set by main: the run's results file, rewritten after every scenario
