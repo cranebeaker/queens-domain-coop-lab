@@ -106,13 +106,14 @@ def client_pulls_aggro(a, b, watch_s=25):
     L = (dx * dx + dy * dy) ** 0.5 or 1.0
     ux, uy = dx / L, dy / L
     placed = False
-    # 3 m from the enemy, away from A first; a spot over a ledge or inside a rock drops B out of the world, so B
-    # must stand at the enemy's height before the test goes on (other directions next)
+    # 3 m from the enemy, away from A first; a spot over a ledge drops B out of the world and one on a rock is out of
+    # the enemy's reach, so B must stand at A's height before the test goes on (other directions next)
     for cx, cy in ((ux, uy), (-uy, ux), (uy, -ux), (0.7 * ux - 0.7 * uy, 0.7 * uy + 0.7 * ux), (0.7 * ux + 0.7 * uy, 0.7 * uy - 0.7 * ux)):
         b.exec(f"tp {ep[0] + cx * 300} {ep[1] + cy * 300} {ep[2] + 60} 0")
         time.sleep(2.0)
         pb = sc.local_pos(b)
-        if pb and abs(pb[2] - ep[2]) < 200:
+        # the ground A stands on (a small enemy cannot climb onto a rock, so B on one is never reached)
+        if pb and abs(pb[2] - pa[2]) < 25:
             placed = True
             break
     if not placed:
