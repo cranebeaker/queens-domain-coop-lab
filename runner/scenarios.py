@@ -1057,9 +1057,8 @@ def host_leaves(a, b, spot=(3000, -2000, 500), after_s=60):
 
 
 LAG_RUNS = ("movement", "ranged_attacks", "area_attacks", "drops_and_xp", "enemy_hp_agree", "death", "host_leaves")
-# what each scenario gives on the plain loopback link (two fresh runs each, see README): lag is judged against it
-LAN_VERDICT = {"movement": "PASS", "ranged_attacks": "FAIL", "area_attacks": "FAIL", "drops_and_xp": "FAIL",
-               "enemy_hp_agree": "PASS or FAIL", "death": "PASS", "host_leaves": "PASS"}
+# what each scenario gives on the plain loopback link (two clean full runs, 2026-11-22): lag is judged against it
+LAN_VERDICT = {n: "PASS" for n in LAG_RUNS}
 
 
 def lag_summary(name, info):
