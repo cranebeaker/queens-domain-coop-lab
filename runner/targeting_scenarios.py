@@ -104,8 +104,19 @@ def client_pulls_aggro(a, b, watch_s=25):
     pa = sc.local_pos(a)
     dx, dy = ep[0] - pa[0], ep[1] - pa[1]
     L = (dx * dx + dy * dy) ** 0.5 or 1.0
-    b.exec(f"tp {ep[0] + dx / L * 300} {ep[1] + dy / L * 300} {ep[2] + 60} 0")   # 3 m past the enemy, away from A
-    time.sleep(1.5)
+    ux, uy = dx / L, dy / L
+    placed = False
+    # 3 m from the enemy, away from A first; a spot over a ledge or inside a rock drops B out of the world, so B
+    # must stand at the enemy's height before the test goes on (other directions next)
+    for cx, cy in ((ux, uy), (-uy, ux), (uy, -ux), (0.7 * ux - 0.7 * uy, 0.7 * uy + 0.7 * ux), (0.7 * ux + 0.7 * uy, 0.7 * uy - 0.7 * ux)):
+        b.exec(f"tp {ep[0] + cx * 300} {ep[1] + cy * 300} {ep[2] + 60} 0")
+        time.sleep(2.0)
+        pb = sc.local_pos(b)
+        if pb and abs(pb[2] - ep[2]) < 200:
+            placed = True
+            break
+    if not placed:
+        return None, {"why": "no spot near the enemy where B stands on the ground"}
     on_b = sc.match_enemy(b, en, 600)
     b.exec("watch start 3000")
     t0 = time.time()
