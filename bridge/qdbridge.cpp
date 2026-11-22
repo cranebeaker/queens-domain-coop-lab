@@ -1095,24 +1095,13 @@ thread_local bool t_inPump = false;
 ULONGLONG g_lastPump = 0;
 
 // The lab copies run on the owner's PC while they use it: a copy must stay a small window on the second monitor and
-// never keep the mouse. The game resets its own video settings when a new game starts (it went fullscreen mid-run and
-// took the mouse), so every 2 s: back to the -ResX x -ResY window at -WinX/-WinY if it changed, and a cursor the game
-// confined to its window is let go.
+// never keep the mouse (a copy went fullscreen mid-run and took it). The launcher seeds a read-only small-window
+// GameUserSettings.ini; this thread (never the game thread: changing the game's video settings from inside its
+// ProcessEvent deadlocked the AMD driver at boot) puts the window back at -WinX/-WinY, -ResX x -ResY if it moved or
+// grew, and lets go of a cursor the game confined to its window. Every 2 s, Win32 only, asynchronous.
 void KeepWindowSmall() {
-    static ULONGLONG last = 0;
-    const ULONGLONG now = GetTickCount64();
-    if (now - last < 2000) return;
-    last = now;
     const int w = ArgInt(L"-ResX=", 800), h = ArgInt(L"-ResY=", 450);
     const int x = ArgInt(L"-WinX=", 1920), y = ArgInt(L"-WinY=", 40);
-    if (SDK::UGameUserSettings* gus = SDK::UGameUserSettings::GetGameUserSettings()) {
-        const SDK::FIntPoint r = gus->GetScreenResolution();
-        if (gus->GetFullscreenMode() != SDK::EWindowMode::Windowed || r.X != w || r.Y != h) {
-            gus->SetFullscreenMode(SDK::EWindowMode::Windowed);
-            gus->SetScreenResolution(SDK::FIntPoint{w, h});
-            gus->ApplyResolutionSettings(false);
-        }
-    }
     struct Find { DWORD pid; HWND hwnd; } f{GetCurrentProcessId(), nullptr};
     EnumWindows([](HWND hw, LPARAM lp) -> BOOL {
         auto* ff = reinterpret_cast<Find*>(lp);
@@ -1125,9 +1114,10 @@ void KeepWindowSmall() {
     RECT wr{};
     GetWindowRect(f.hwnd, &wr);
     const LONG style = GetWindowLongW(f.hwnd, GWL_STYLE);
-    if (!(style & WS_CAPTION)) SetWindowLongW(f.hwnd, GWL_STYLE, style | WS_OVERLAPPEDWINDOW);   // borderless -> framed
-    if (wr.left != x || wr.top != y || wr.right - wr.left > w + 40 || wr.bottom - wr.top > h + 60)
-        SetWindowPos(f.hwnd, nullptr, x, y, w, h, SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED);
+    const bool grew = wr.right - wr.left > w + 40 || wr.bottom - wr.top > h + 60;
+    if (grew && !(style & WS_CAPTION)) SetWindowLongW(f.hwnd, GWL_STYLE, (style & ~WS_POPUP) | WS_OVERLAPPEDWINDOW);
+    if (grew || wr.left != x || wr.top != y)
+        SetWindowPos(f.hwnd, nullptr, x, y, w, h, SWP_NOACTIVATE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_ASYNCWINDOWPOS);
     RECT clip{};
     GetWindowRect(f.hwnd, &wr);
     if (GetClipCursor(&clip) && clip.left >= wr.left - 8 && clip.right <= wr.right + 8 && clip.top >= wr.top - 40 &&
@@ -1144,7 +1134,6 @@ void HookedProcessEvent(SDK::UObject* obj, SDK::UFunction* fn, void* parms) {
             t_inPump = true;
             g_server.Pump();
             WatchTick();
-            KeepWindowSmall();
             t_inPump = false;
         }
     }
@@ -1277,6 +1266,12 @@ void Main() {
     opt.build = "qdbridge-0.1";
     opt.tcpPort = ArgInt(L"-qdbridge-port=", 27990);
     if (!g_server.Start(opt, g_adapter)) return;
+    CreateThread(nullptr, 0, [](LPVOID) -> DWORD {
+        for (;;) {
+            Sleep(2000);
+            KeepWindowSmall();
+        }
+    }, nullptr, 0, nullptr);
     // Hang watchdog: when the game thread stops pumping for 20 s (after the hooks are in), write one minidump with
     // every thread's stack next to the mod's log, so a freeze in a test run can be read afterwards. Up to 3 a run.
     CreateThread(nullptr, 0, [](LPVOID) -> DWORD {

@@ -9,6 +9,7 @@ Only ever touches the copies under ../copies. Run with: py -3 -I runner/qdlab.py
 import ctypes
 import ctypes.wintypes as wt
 import os
+import stat
 import subprocess
 import sys
 import time
@@ -79,8 +80,13 @@ def seed_settings(name):
     cfg = os.path.join(copy_dir(name), "QueensDomain", "Saved", "Config", "WindowsNoEditor")
     os.makedirs(cfg, exist_ok=True)
     x, y = window_pos(name)
-    with open(os.path.join(cfg, "GameUserSettings.ini"), "w", encoding="utf-8") as f:
+    # read-only: the game rewrote it with its own defaults (fullscreen) mid-run and the copy took the owner's mouse
+    gus = os.path.join(cfg, "GameUserSettings.ini")
+    if os.path.exists(gus):
+        os.chmod(gus, stat.S_IWRITE | stat.S_IREAD)
+    with open(gus, "w", encoding="utf-8") as f:
         f.write(SETTINGS.format(w=WIN_W, h=WIN_H, x=x, y=y))
+    os.chmod(gus, stat.S_IREAD)
     # A focused Unreal window captures the mouse (hides it and keeps it inside the window). The lab copies run while
     # their owner works on something else: never capture or lock it.
     with open(os.path.join(cfg, "Input.ini"), "w", encoding="utf-8") as f:

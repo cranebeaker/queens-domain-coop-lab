@@ -85,6 +85,9 @@ def start(name, role=None, join_port=None, load=False):
     time.sleep(5)   # the loader needs the process past its own start before LoadLibrary
     dll = os.path.join(qdlab.COPIES, name, "qdbridge.dll")   # inject a copy so the build output never stays locked
     shutil.copyfile(BRIDGE_DLL, dll)
+    pdb = BRIDGE_DLL[:-4] + ".pdb"
+    if os.path.isfile(pdb):   # for the hang watchdog's stack report
+        shutil.copyfile(pdb, dll[:-4] + ".pdb")
     qdlab.inject(pid, dll)
     g = connect(name)
     wait_until(lambda: g.eval("title") is True, 120, step=0.5, what=f"{name} title screen")

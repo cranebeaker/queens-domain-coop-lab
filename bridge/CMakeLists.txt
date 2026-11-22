@@ -17,3 +17,6 @@ add_library(qdbridge SHARED
     ${QD_SDK}/SDK/Engine_functions.cpp)
 target_include_directories(qdbridge PRIVATE ${QD_SDK} ${COOPBRIDGE})
 target_link_libraries(qdbridge PRIVATE ws2_32 user32 dbghelp)
+# symbols next to the dll: the hang watchdog's stack report names bridge functions too
+target_compile_options(qdbridge PRIVATE $<$<CONFIG:Release>:/Zi>)
+target_link_options(qdbridge PRIVATE $<$<CONFIG:Release>:/DEBUG /OPT:REF /OPT:ICF>)
