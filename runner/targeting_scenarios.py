@@ -198,17 +198,30 @@ def _max_hp(g, name, enemy_name):
     return None
 
 
-def _hits_on(a, b, secs):
-    """Health lost per hit by each player while both stand among the group (god mode keeps them alive)."""
-    for g in (a, b):
-        g.exec("watch start 3000")
-    time.sleep(secs)
-    out = {}
-    for n, g in (("A", a), ("B", b)):
-        g.exec("watch stop")
-        out[n] = sorted(round(h["amount"], 1) for h in g.state(sections=["watch"])["watch"]["health"]["hits"]
-                        if h.get("amount") and h["amount"] > 0)
-    return out
+def _hits_on(a, b, secs, windows=3):
+    """Health lost per hit by each player while both stand among the group (god mode keeps them alive). Which enemy
+    goes for whom is up to the game: while one player has taken no hit, that player pokes the enemy nearest to them
+    (the last-hitter rule sends it their way) and the count goes on, up to `windows` rounds."""
+    sc = _sc()
+    out = {"A": [], "B": []}
+    for w in range(windows):
+        for g in (a, b):
+            g.exec("watch start 3000")
+        time.sleep(secs)
+        for n, g in (("A", a), ("B", b)):
+            g.exec("watch stop")
+            out[n] += [round(h["amount"], 1) for h in g.state(sections=["watch"])["watch"]["health"]["hits"]
+                       if h.get("amount") and h["amount"] > 0]
+        if out["A"] and out["B"]:
+            break
+        for n, g in (("A", a), ("B", b)):
+            if out[n]:
+                continue
+            p = sc.local_pos(g)
+            near = [e for e in sc.enemies(g) if e.get("hp") and not e.get("dead") and sc.dist(e["pos"], p) < 3000]
+            if near:
+                g.exec(f"kd ehit {min(near, key=lambda e: sc.dist(e['pos'], p))['name']} 1")
+    return {n: sorted(v) for n, v in out.items()}
 
 
 def difficulty_hard(a, b, secs=25):
