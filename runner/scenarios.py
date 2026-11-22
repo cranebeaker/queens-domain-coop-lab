@@ -656,10 +656,16 @@ def drops_and_xp(a, b, spot=(3000, -2000, 500), kills=20):
     before = {"A": rewards(a), "B": rewards(b)}
     picks_before = {"A": set(visible_pickups(a)), "B": set(visible_pickups(b))}
     rows = []
-    for en in targets:
+    kill_at = []
+    done_names = set()
+
+    def kill(en):
         a.exec(f"kd egoto {en['name']} 300")
         time.sleep(1.5)
         b_behind_a(en["pos"])
+        now_a = enemy_by_name(a, en["name"])   # enemies wander: the drop lands where it dies, not where it stood
+        kill_at.append(now_a["pos"] if now_a else en["pos"])
+        done_names.add(en["name"])
         k0 = {"A": rewards(a)["kills"], "B": rewards(b)["kills"]}
         on_b = match_enemy(b, en, 400)   # B's copy of this enemy, before the hit
         # 4000: kills any small enemy, and stays under the mod's 5000 cap for a hit relayed to another owner
@@ -676,16 +682,35 @@ def drops_and_xp(a, b, spot=(3000, -2000, 500), kills=20):
                      "b_copy": None if on_b is None else {
                          "off_cm": round(dist(on_b["pos"], en["pos"])),
                          "after": "gone" if b_after is None else {"dead": b_after["dead"], "hp": b_after.get("hp")}}})
-    time.sleep(3)
-    after = {"A": rewards(a), "B": rewards(b)}
 
-    pk_a, pk_b = visible_pickups(a), visible_pickups(b)
-    kill_at = [en["pos"] for en in targets]
     # drops land at the enemy's feet and are spawned at run time ("<Class>_<number>", and the bridge's drop flag);
     # placed pickups that stream in near a kill are not drops
     near_kill = lambda p: any(dist(p["pos"], k) < 800 for k in kill_at) and p["name"].startswith(p["class"] + "_")
-    new = {"A": {n: p for n, p in pk_a.items() if n not in picks_before["A"] and near_kill(p) and p.get("drop", True)},
-           "B": {n: p for n, p in pk_b.items() if n not in picks_before["B"] and near_kill(p) and p.get("drop", True)}}
+
+    def new_drops():
+        pk_a, pk_b = visible_pickups(a), visible_pickups(b)
+        return {"A": {n: p for n, p in pk_a.items() if n not in picks_before["A"] and near_kill(p) and p.get("drop", True)},
+                "B": {n: p for n, p in pk_b.items() if n not in picks_before["B"] and near_kill(p) and p.get("drop", True)}}
+
+    for en in targets:
+        kill(en)
+    time.sleep(3)
+    new = new_drops()
+    # drops are random: while nothing has dropped, A goes on through the next small enemies (two more rounds)
+    for _ in range(2):
+        if new["A"] or new["B"]:
+            break
+        pa = local_pos(a)
+        more = [e for e in enemies(a) if e.get("hp") and e["hp"] < 200 and not e.get("dead")
+                and e["name"] not in done_names and dist(e["pos"], pa) < 8000]
+        more.sort(key=lambda e: dist(e["pos"], pa))
+        if not more:
+            break
+        for en in more[:kills]:
+            kill(en)
+        time.sleep(3)
+        new = new_drops()
+    after = {"A": rewards(a), "B": rewards(b)}
     res = {"spot": spot, "kills": rows,
            "xp": {n: [before[n]["xp"], after[n]["xp"]] for n in ("A", "B")},
            "kill_counts": {n: after[n]["kills"] for n in ("A", "B")},
