@@ -1193,7 +1193,7 @@ def ensure_boss(a, b, cls, spawner, wait_s=20):
     return False
 
 
-def fight_half(g, other, cls, seconds, goto_cm=250):
+def fight_half(g, other, cls, seconds, goto_cm=250, probe=None):
     """`g` fights the boss for `seconds`, or up to twice as long until it has been hit (its hits make it the boss's
     target, the other player stands 20 m back); both players' health dents counted."""
     for x in (g, other):
@@ -1223,6 +1223,8 @@ def fight_half(g, other, cls, seconds, goto_cm=250):
             other.exec(f"kd egoto {to} 2000")   # the other player stands back, so the boss turns to `g`
             next_goto = time.time() + 6
         g.exec(f"kd ehit {tg} 1")
+        if probe:
+            probe()   # a scenario's own look at both copies during the fight
         time.sleep(2.5)
     out = []
     for x in (g, other):
@@ -1232,15 +1234,29 @@ def fight_half(g, other, cls, seconds, goto_cm=250):
     return out
 
 
-def fight(a, b, cls, seconds=60, goto_cm=250, host_first=False):
+def boss_montage(g, name, cls):
+    """The montage this copy's boss of class `cls` plays now ('-' for none, None when it is not listed)."""
+    boss = boss_of(g, cls)
+    if not boss:
+        return None
+    mark = len(kd_log_all(name))
+    g.exec(f"kd elist {boss['name']}")
+    time.sleep(0.4)
+    for line in kd_log_all(name)[mark:]:
+        if "[edbg] E " in line and " montage=" in line:
+            return line.split(" montage=", 1)[1].split()[0]
+    return None
+
+
+def fight(a, b, cls, seconds=60, goto_cm=250, host_first=False, probe=None):
     """Half the time the boss fights B (its attacks reach B through the mirrored hitboxes), half the time A. Each
     stands `goto_cm` from the boss (farther for a boss in a pool that throws the player out)."""
     if host_first:
-        ha = fight_half(a, b, cls, seconds / 2, goto_cm)
-        hb = fight_half(b, a, cls, seconds / 2, goto_cm)
+        ha = fight_half(a, b, cls, seconds / 2, goto_cm, probe)
+        hb = fight_half(b, a, cls, seconds / 2, goto_cm, probe)
     else:
-        hb = fight_half(b, a, cls, seconds / 2, goto_cm)
-        ha = fight_half(a, b, cls, seconds / 2, goto_cm)
+        hb = fight_half(b, a, cls, seconds / 2, goto_cm, probe)
+        ha = fight_half(a, b, cls, seconds / 2, goto_cm, probe)
     return {"b_fights": {"b": hb[0], "a": hb[1]}, "a_fights": {"a": ha[0], "b": ha[1]}}
 
 
@@ -1581,15 +1597,35 @@ def whaleking(a, b):
         return None, {"why": "the Whaleking is not on both copies"}
     res, checks = {}, {}
     log_from = {n: len(kd_log_all(n)) for n in ("A", "B")}
+    # issue 2 of the upstream mod: on a client the boss kept falling from the sky again (its intro, DoIntro) during
+    # the fight: its spawner restarts the boss's AI whenever a player walks into the arena, and the client's copy
+    # (AI off, the host runs it) took that as a fresh start. A trace of the boss's functions on each copy from after
+    # its intro: no DoIntro, while B walks out of the arena and back in. (Its jump-and-slam attack lands with the
+    # intro's montage, so montages cannot tell.)
     b.exec(f"kd ewake {cls}")
     time.sleep(15)   # its intro
+    wake_end = {n: len(kd_log_all(n)) for n in ("A", "B")}
+    for g in (a, b):
+        g.exec(f"kd trace {cls}_C 400")
     res["after_start"] = both(lambda g: boss_of(g, cls), a, b)
     checks["boss_awake_both"] = all(x and not x["trap"] and not x["hidden"] for x in res["after_start"].values())
     res["fight"] = fight(a, b, cls, seconds=90)
+    for _ in range(2):   # B leaves the arena and walks back in, as a player fetching a potion would
+        b.exec(f"kd egoto {cls} 6000")
+        time.sleep(4)
+        b.exec(f"kd egoto {cls} 400")
+        time.sleep(5)
     # below half its health: its second phase drains the arena and brings poison
     a.exec(f"kd ehp {cls} 0.45")
     time.sleep(2)
     res["fight_phase2"] = fight(a, b, cls, seconds=60)
+    intro = lambda n, lo, hi: sum(1 for l in kd_log_all(n)[lo:hi] if "[trace]" in l and ":DoIntro " in l)
+    fight_end = {n: len(kd_log_all(n)) for n in ("A", "B")}
+    res["intro_during_fight"] = {n: intro(n, wake_end[n], fight_end[n]) for n in ("A", "B")}
+    res["b_restarts_skipped"] = sum(1 for l in kd_log_all("B")[wake_end["B"]:fight_end["B"]]
+                                    if "asked to start its AI again" in l and "Whaleking" in l)
+    checks["intro_never_replays"] = not any(res["intro_during_fight"].values())
+    checks["arena_reentry_tried"] = res["b_restarts_skipped"] > 0
     # it keeps one target for long stretches, so a player may only get its turn in the second phase: count the whole
     # fight (each player must still be hit at some point)
     hits = lambda who: res["fight"][f"{who}_fights"][who]["hits"] + res["fight_phase2"][f"{who}_fights"][who]["hits"]
@@ -1598,8 +1634,12 @@ def whaleking(a, b):
     res["calls_sent"], res["calls_run"] = calls_follow(log_from, ("DrainWater", "RefillWater", "RemovePoison",
                                                                    "KillPoisonCircles", "DoHornBreak"))
     checks["arena_changes_follow"] = sorted(res["calls_sent"]) == sorted(res["calls_run"])
-    res["pools"] = both(lambda g: len(actors(g, "WhaleKingPoisonCircle")), a, b)
     suspended_boss_end(a, b, cls, res, checks, "WhaleKingRewardCount")
+    # its pools go with it on both copies (they are switched off, then gone 5 s later): none stays behind to poison
+    # a player after the fight
+    time.sleep(8)
+    res["pools"] = both(lambda g: len(actors(g, "WhaleKingPoisonCircle")), a, b)
+    checks["no_pools_left"] = all(n == 0 for n in res["pools"].values())
     res["saves"] = both(lambda g: named(g, "WhaleKingIsDead"), a, b)
     checks["killed_flag_both"] = all(x.get("WhaleKingIsDead") == 1 for x in res["saves"].values())
     boss_scenario_end(a, b)
