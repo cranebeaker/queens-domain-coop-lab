@@ -2377,7 +2377,11 @@ SUITES["party"] = party_scenarios.SUITE
 import targeting_scenarios  # noqa: E402
 SCENARIOS.update(targeting_scenarios.SCENARIOS)
 SUITES["targeting"] = targeting_scenarios.SUITE
-SUITES["all"] = SUITES["lane1"] + SUITES["lane2"] + SUITES["laneA"] + SUITES["laneb"] + SUITES["party"] + SUITES["targeting"]
+import fix_scenarios  # noqa: E402
+SCENARIOS.update(fix_scenarios.SCENARIOS)
+SUITES["fixes"] = fix_scenarios.SUITE
+SUITES["all"] = (SUITES["lane1"] + SUITES["lane2"] + SUITES["laneA"] + SUITES["laneb"] + SUITES["party"] + SUITES["targeting"] +
+                 SUITES["fixes"])
 
 
 RESULTS_PATH = None   # set by main: the run's results file, rewritten after every scenario
