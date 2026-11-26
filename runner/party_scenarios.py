@@ -96,6 +96,8 @@ def revive(a, b):
         res["a_state"] = pstate(a, "A")
         res["a_player"] = player(a)
         return (False if not player(a).get("dead") else None), {"why": "A did not go down", **res}
+    # the revive prompt needs the reviver to look at the body (1.6.0): B stands 1.5 m from A, facing it
+    b.exec("kd look 0 150 0")
     time.sleep(2)
     sa, sb = pstate(a, "A"), pstate(b, "B")
     res["a_dead_flag_while_down"] = sa.get("dead")
@@ -174,8 +176,12 @@ def _party_checkpoint(a, b, button, label):
     log_from = len(sc.kd_log_all("B"))
     a.exec(f"tpto {CHECKPOINT} 200")
     time.sleep(2)
-    a.exec(f"interact {CHECKPOINT}")
-    time.sleep(3)
+    # the first touch can lose its menu to the item catch-up a few seconds after a join: touch again until it shows
+    for _ in range(4):
+        a.exec(f"interact {CHECKPOINT}")
+        time.sleep(3)
+        if "inviewport=1" in str(safe(lambda: a.exec("widgets SaveMenu_C")["output"], "")):
+            break
     cp = [c for c in a.state(sections=["checkpoints"])["checkpoints"] if c["name"] == CHECKPOINT]
     cp_pos = cp[0]["pos"] if cp else sc.local_pos(a)
     b_start = sc.local_pos(b)

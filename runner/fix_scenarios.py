@@ -224,10 +224,16 @@ def _downed_case(a, b, victim, helper, vname, hname, vslot, hslot):
                 moved = round(time.time() - t0, 1)
                 break
             time.sleep(0.4)
-        time.sleep(6)
+        views = []
+        for _ in range(4):
+            time.sleep(2)
+            ph = sc.local_pos(helper)
+            on_h = sc.match_enemy(helper, cur, 1500) or {}
+            views.append({"owner": owner_of(a, name_on_a)[0], "dist_to_helper": round(sc.dist(on_h["pos"], ph)) if on_h.get("pos") else None,
+                          **{k: on_h.get(k) for k in ("move", "speed", "aiDisabled", "dead", "controller")}})
         helper.exec("watch stop")
         hits = len(helper.state(sections=["watch"])["watch"]["health"]["hits"])
-        return {"enemy": en["name"], "owner_to_helper_s": moved, "helper_hits": hits}
+        return {"enemy": en["name"], "owner_to_helper_s": moved, "helper_hits": hits, "helper_view": views}
     return {"why": "no enemy to test"}
 
 
@@ -237,6 +243,7 @@ def _place_a(a, b, cur, pb):
 
 
 def _downed(a, b, host_case):
+    time.sleep(15)   # past the join's enemy respawns and item catch-up, which run in the first seconds of a pair
     for g in (a, b):
         g.exec("kd party down 1")
         g.exec("kd party hold 0")

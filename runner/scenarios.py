@@ -298,7 +298,11 @@ def rejoin(a, b):
     host_view = obj_state(a, target)
     rig.qdlab.stop_copy("B")
     time.sleep(3)
-    b2 = rig.boot("B", "join")
+    # B boots to its title screen and joins from there (as fast_pair does): booted with auto-join, B can be in the
+    # lobby and on its way into the world before the rig ever sees the title screen
+    b2 = rig.start("B", "later")
+    rig.join(b2, "B")
+    b2 = rig.enter(b2, "B")
     time.sleep(10)
     client_view = obj_state(b2, target)
     puppets = remote_players(a)
